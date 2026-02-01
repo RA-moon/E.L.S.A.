@@ -122,6 +122,16 @@ static ArduinoFFT<double> s_fft = ArduinoFFT<double>(s_vReal, s_vImag, kFftSampl
 static float s_bassEma = 0.0f;
 static float s_prevBass = 0.0f;
 static uint32_t s_lastBeatMs = 0;
+static uint32_t s_lastBeatIntervalMs = 0;
+static AudioTelemetry s_audioTelemetry = {};
+
+static void initTelemetryConstants() {
+  s_audioTelemetry.sampleRateHz = kSampleRateHz;
+  s_audioTelemetry.fftSamples = kFftSamples;
+  s_audioTelemetry.bassMinHz = kBassMinHz;
+  s_audioTelemetry.bassMaxHz = kBassMaxHz;
+  s_audioTelemetry.binWidthHz = (float)kSampleRateHz / (float)kFftSamples;
+}
 
 static void updateBeatIntervalAverage(uint32_t nowMs) {
   if (s_lastBeatMs == 0) return;
@@ -152,6 +162,7 @@ static void fakeAudioPulse() {
 }
 
 void setupI2S() {
+  initTelemetryConstants();
 #if AUDIO_ENABLE_I2S
   // STD mode uses separate DIN/DOUT pins; we only need DIN for a microphone.
   // setPins(bclk, ws, dout, din, mclk)
@@ -173,6 +184,21 @@ void processAudio() {
 #if AUDIO_ENABLE_I2S
   if (!s_i2sOk) {
     fakeAudioPulse();
+    s_audioTelemetry.i2sOk = false;
+    s_audioTelemetry.bass = 0.0f;
+    s_audioTelemetry.bassEma = s_bassEma;
+    s_audioTelemetry.ratio = 0.0f;
+    s_audioTelemetry.rise = 0.0f;
+    s_audioTelemetry.threshold = 0.0f;
+    s_audioTelemetry.riseThreshold = 0.0f;
+    s_audioTelemetry.intervalOk = false;
+    s_audioTelemetry.above = false;
+    s_audioTelemetry.rising = false;
+    s_audioTelemetry.binMin = 0;
+    s_audioTelemetry.binMax = 0;
+    s_audioTelemetry.lastBeatMs = s_lastBeatMs;
+    s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
+    s_audioTelemetry.beatStrength = 0.0f;
     return;
   }
 
@@ -224,20 +250,41 @@ void processAudio() {
   // Beat decision
   const uint32_t now = millis();
   const float rise = bass - s_prevBass;
+  const uint32_t intervalMs = (s_lastBeatMs > 0) ? (now - s_lastBeatMs) : 0;
   const bool intervalOk = (now - s_lastBeatMs) >= kMinBeatIntervalMs;
   const bool above = bass > (s_bassEma * kBeatThreshold);
   const bool rising = rise > (s_bassEma * kBeatRiseFactor);
 
+  const float ratio = bass / (s_bassEma + 1e-3f);
+  s_audioTelemetry.i2sOk = true;
+  s_audioTelemetry.bass = bass;
+  s_audioTelemetry.bassEma = s_bassEma;
+  s_audioTelemetry.ratio = ratio;
+  s_audioTelemetry.rise = rise;
+  s_audioTelemetry.threshold = s_bassEma * kBeatThreshold;
+  s_audioTelemetry.riseThreshold = s_bassEma * kBeatRiseFactor;
+  s_audioTelemetry.intervalOk = intervalOk;
+  s_audioTelemetry.above = above;
+  s_audioTelemetry.rising = rising;
+  s_audioTelemetry.binMin = binMin;
+  s_audioTelemetry.binMax = binMax;
+  s_audioTelemetry.lastBeatMs = s_lastBeatMs;
+  s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
+  s_audioTelemetry.beatStrength = 0.0f;
+
   if (intervalOk && above && rising) {
-    const float ratio = bass / (s_bassEma + 1e-3f);
     const float strength = clamp01((ratio - kBeatThreshold) / kBeatThreshold);
 
     s_beatPending = true;
     s_beatStrength = strength;
+    s_audioTelemetry.beatStrength = strength;
 
     // Update average beat interval (tempo estimate) before resetting the timer.
     updateBeatIntervalAverage(now);
+    s_lastBeatIntervalMs = intervalMs;
     s_lastBeatMs = now;
+    s_audioTelemetry.lastBeatMs = s_lastBeatMs;
+    s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
 
     // Also drive the global brightness pulse.
     const float pulse = 1.0f + (0.9f * strength);
@@ -254,6 +301,7 @@ void processAudio() {
 #else
 // Fallback stubs for environments without ESP_I2S.h (e.g., older PlatformIO cores).
 static float s_avgBeatIntervalMs = 500.0f;
+static AudioTelemetry s_audioTelemetry = {};
 bool consumeBeat(float* strength) {
   if (strength) *strength = 0.0f;
   return false;
@@ -269,6 +317,12 @@ float getAverageBpm() {
 }
 
 void setupI2S() {
+  s_audioTelemetry.sampleRateHz = kSampleRateHz;
+  s_audioTelemetry.fftSamples = kFftSamples;
+  s_audioTelemetry.bassMinHz = kBassMinHz;
+  s_audioTelemetry.bassMaxHz = kBassMaxHz;
+  s_audioTelemetry.binWidthHz = (float)kSampleRateHz / (float)kFftSamples;
+  s_audioTelemetry.i2sOk = false;
   Serial.println("ESP_I2S.h not available; audio disabled");
 }
 
@@ -276,3 +330,8 @@ void processAudio() {
   // No-op without ESP_I2S support.
 }
 #endif
+
+void getAudioTelemetry(AudioTelemetry* out) {
+  if (!out) return;
+  *out = s_audioTelemetry;
+}

@@ -42,7 +42,7 @@
 
 // === Test mode ===
 // Set to 1 to blink white on the first TEST_LED_COUNT LEDs (matching your Arduino IDE test).
-#define TEST_SOLID_COLOR  1
+#define TEST_SOLID_COLOR  0
 #define TEST_LED_COUNT    30
 
 // === Web telemetry (beat/pattern output) ===
@@ -264,14 +264,22 @@ static void handleStatus() {
   const uint32_t lastBeat = telemetry.lastBeatMs;
   const uint32_t age = (lastBeat > 0) ? (now - lastBeat) : 0;
 
-  char json[420];
+  AudioTelemetry audio = {};
+  getAudioTelemetry(&audio);
+
+  char json[900];
   const int n = snprintf(
     json,
     sizeof(json),
     "{\"uptimeMs\":%lu,\"beatCount\":%lu,\"lastBeatMs\":%lu,\"lastBeatAgeMs\":%lu,"
     "\"ledCount\":%u,\"frameBytes\":%u,"
     "\"lastBeatStrength\":%.3f,\"avgBeatIntervalMs\":%.1f,\"bpm\":%.1f,"
-    "\"animation\":{\"index\":%d,\"name\":\"%s\"}}",
+    "\"animation\":{\"index\":%d,\"name\":\"%s\"},"
+    "\"audio\":{\"i2sOk\":%u,\"bass\":%.2f,\"bassEma\":%.2f,\"ratio\":%.2f,"
+    "\"rise\":%.2f,\"threshold\":%.2f,\"riseThreshold\":%.2f,"
+    "\"intervalOk\":%u,\"above\":%u,\"rising\":%u,\"lastBeatIntervalMs\":%lu,"
+    "\"fft\":{\"sampleRateHz\":%lu,\"samples\":%u,\"binWidthHz\":%.2f,"
+    "\"bassMinHz\":%.1f,\"bassMaxHz\":%.1f,\"binMin\":%u,\"binMax\":%u}}}",
     (unsigned long)now,
     (unsigned long)telemetry.beatCount,
     (unsigned long)lastBeat,
@@ -282,7 +290,25 @@ static void handleStatus() {
     telemetry.avgBeatIntervalMs,
     telemetry.bpm,
     telemetry.animationIndex,
-    telemetry.animationName ? telemetry.animationName : "unknown"
+    telemetry.animationName ? telemetry.animationName : "unknown",
+    (unsigned)(audio.i2sOk ? 1 : 0),
+    audio.bass,
+    audio.bassEma,
+    audio.ratio,
+    audio.rise,
+    audio.threshold,
+    audio.riseThreshold,
+    (unsigned)(audio.intervalOk ? 1 : 0),
+    (unsigned)(audio.above ? 1 : 0),
+    (unsigned)(audio.rising ? 1 : 0),
+    (unsigned long)audio.lastBeatIntervalMs,
+    (unsigned long)audio.sampleRateHz,
+    (unsigned)audio.fftSamples,
+    audio.binWidthHz,
+    audio.bassMinHz,
+    audio.bassMaxHz,
+    (unsigned)audio.binMin,
+    (unsigned)audio.binMax
   );
 
   if (n <= 0) {
