@@ -20,8 +20,10 @@
 #define HAS_ESP_I2S 1
 #endif
 
-// FFT library (bundled into this sketch folder)
-#include "arduinoFFT.h"
+// ESP-DSP FFT
+#include "esp_dsp.h"
+#include "dsps_wind_hann.h"
+#include <math.h>
 
 // === Compile-time switches ===
 #ifndef AUDIO_ENABLE_I2S
@@ -82,15 +84,17 @@ static uint32_t s_sampleRateHz = kPrimarySampleRateHz;
 static constexpr float kBassMinHz = 40.0f;
 static constexpr float kBassMaxHz = 180.0f;
 
-static constexpr float kEmaAlpha       = 0.08f;    // smoothing for bass energy
-static constexpr float kBeatThreshold  = 1.8f;     // energy must exceed (ema * threshold)
-static constexpr float kBeatRiseFactor = 0.10f;    // require a minimum rise vs previous energy
-static constexpr uint32_t kMinBeatIntervalMs = 120;
-
+static BeatDetectorConfig s_beatConfig = {
+  0.10f,  // energyEmaAlpha
+  0.20f,  // fluxEmaAlpha
+  1.7f,   // fluxThreshold
+  0.12f,  // fluxRiseFactor
+  120,    // minBeatIntervalMs
+  180,    // avgBeatMinMs
+  2000    // avgBeatMaxMs
+};
 // Beat interval averaging (tempo estimate)
-static constexpr float    kBeatIntervalEmaAlpha = 0.15f;  // 0.05..0.25
-static constexpr uint32_t kAvgBeatMinMs = 180;             // ignore unrealistically fast beats
-static constexpr uint32_t kAvgBeatMaxMs = 2000;            // ignore very slow gaps
+static constexpr float kBeatIntervalEmaAlpha = 0.15f;  // 0.05..0.25
 
 // Baseline pulse multiplier (the main loop further decays + clamps it).
 float brightnessPulse = 1.0f;
@@ -102,6 +106,14 @@ static inline float clamp01(float x) {
 }
 
 #if HAS_ESP_I2S || HAS_ARDUINO_I2S
+static const char* kI2SApiName =
+#if HAS_ESP_I2S
+  "ESP_I2S";
+#elif HAS_ARDUINO_I2S
+  "I2S.h";
+#else
+  "none";
+#endif
 // Beat event (edge triggered)
 static volatile bool  s_beatPending  = false;
 static volatile float s_beatStrength = 0.0f;
@@ -126,26 +138,50 @@ float getAverageBpm() {
   return (ms > 1.0f) ? (60000.0f / ms) : 0.0f;
 }
 
+void getBeatDetectorConfig(BeatDetectorConfig* out) {
+  if (!out) return;
+  *out = s_beatConfig;
+}
+
+void setBeatDetectorConfig(const BeatDetectorConfig* cfg) {
+  if (!cfg) return;
+  s_beatConfig = *cfg;
+}
+
 #if HAS_ESP_I2S
 static I2SClass I2S;
 #endif
 static bool s_i2sOk = false;
+static size_t s_i2sBytesFilled = 0;
 
 // Interleaved stereo (L,R) 32-bit words
 static int32_t s_i2sRaw[kFftSamples * 2];
 
-static double s_vReal[kFftSamples];
-static double s_vImag[kFftSamples];
-static ArduinoFFT<double> s_fft = ArduinoFFT<double>(s_vReal, s_vImag, kFftSamples, kPrimarySampleRateHz);
+// Interleaved complex FFT buffer: Re[0], Im[0], Re[1], Im[1], ...
+static float s_fftBuffer[kFftSamples * 2];
+static float s_window[kFftSamples];
+static bool s_dspReady = false;
 
 static float s_bassEma = 0.0f;
-static float s_prevBass = 0.0f;
+static float s_fluxEma = 0.0f;
+static float s_prevFlux = 0.0f;
+static float s_prevMag[kFftSamples / 2] = {};
 static uint32_t s_lastBeatMs = 0;
 static uint32_t s_lastBeatIntervalMs = 0;
+static uint16_t s_intervalBuffer[6] = {};
+static uint8_t s_intervalCount = 0;
+static uint8_t s_intervalIndex = 0;
 static AudioTelemetry s_audioTelemetry = {};
 
-static void resetFft() {
-  s_fft = ArduinoFFT<double>(s_vReal, s_vImag, kFftSamples, s_sampleRateHz);
+static void initDsp() {
+  if (s_dspReady) return;
+  if (dsps_fft2r_init_fc32(NULL, kFftSamples) != ESP_OK) {
+    s_dspReady = false;
+    return;
+  }
+  dsps_fft2r_rev_tables_init_fc32();
+  dsps_wind_hann_f32(s_window, kFftSamples);
+  s_dspReady = true;
 }
 
 static void initTelemetryConstants() {
@@ -163,12 +199,12 @@ static bool beginI2S(uint32_t sampleRateHz) {
   I2S.setPins(I2S_BCLK_PIN, I2S_WS_PIN, -1, I2S_DIN_PIN, I2S_MCLK_PIN);
   return I2S.begin(I2S_MODE_STD, sampleRateHz, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
 #elif HAS_ARDUINO_I2S
+  // Configure pins before begin() so the driver installs with the right mapping.
+  // Order: (SCK, WS, SD, SD_OUT, SD_IN)
+  I2S.setAllPins(I2S_BCLK_PIN, I2S_WS_PIN, I2S_DIN_PIN, -1, I2S_DIN_PIN);
   if (!I2S.begin(I2S_PHILIPS_MODE, (int)sampleRateHz, 32)) {
     return false;
   }
-  I2S.setSckPin(I2S_BCLK_PIN);
-  I2S.setFsPin(I2S_WS_PIN);
-  I2S.setDataInPin(I2S_DIN_PIN);
   return true;
 #else
   (void)sampleRateHz;
@@ -192,11 +228,33 @@ static size_t readI2SBytes(void* buffer, size_t bytes) {
 static void updateBeatIntervalAverage(uint32_t nowMs) {
   if (s_lastBeatMs == 0) return;
   const uint32_t intervalMs = nowMs - s_lastBeatMs;
-  if (intervalMs < kAvgBeatMinMs || intervalMs > kAvgBeatMaxMs) return;
+  if (intervalMs < s_beatConfig.avgBeatMinMs || intervalMs > s_beatConfig.avgBeatMaxMs) return;
 
-  // Exponential moving average of the beat interval.
+  // Keep a small rolling buffer for median-based tempo estimate.
+  s_intervalBuffer[s_intervalIndex] = (uint16_t)intervalMs;
+  s_intervalIndex = (uint8_t)((s_intervalIndex + 1) % (uint8_t)(sizeof(s_intervalBuffer) / sizeof(s_intervalBuffer[0])));
+  if (s_intervalCount < (uint8_t)(sizeof(s_intervalBuffer) / sizeof(s_intervalBuffer[0]))) {
+    s_intervalCount++;
+  }
+
+  // Median of recent intervals (robust against outliers).
+  uint16_t tmp[6] = {};
+  for (uint8_t i = 0; i < s_intervalCount; i++) tmp[i] = s_intervalBuffer[i];
+  // Simple insertion sort (small N).
+  for (uint8_t i = 1; i < s_intervalCount; i++) {
+    uint16_t key = tmp[i];
+    int j = (int)i - 1;
+    while (j >= 0 && tmp[j] > key) {
+      tmp[j + 1] = tmp[j];
+      j--;
+    }
+    tmp[j + 1] = key;
+  }
+  const uint16_t median = tmp[s_intervalCount / 2];
+
+  // Exponential moving average of the median interval.
   s_avgBeatIntervalMs = (1.0f - kBeatIntervalEmaAlpha) * s_avgBeatIntervalMs +
-                      (kBeatIntervalEmaAlpha * (float)intervalMs);
+                        (kBeatIntervalEmaAlpha * (float)median);
 }
 
 static void fakeAudioPulse() {
@@ -220,14 +278,25 @@ static void fakeAudioPulse() {
 void setupI2S() {
 #if AUDIO_ENABLE_I2S
   s_sampleRateHz = kPrimarySampleRateHz;
+  bool usedFallback = false;
   // Use 32-bit stereo so BCLK = 64 * Fs (required by SPH0645).
   s_i2sOk = beginI2S(s_sampleRateHz);
   if (!s_i2sOk && kFallbackSampleRateHz != kPrimarySampleRateHz) {
     s_sampleRateHz = kFallbackSampleRateHz;
     s_i2sOk = beginI2S(s_sampleRateHz);
+    usedFallback = true;
   }
-  resetFft();
   initTelemetryConstants();
+  initDsp();
+
+  Serial.printf("I2S init (%s): sr=%lu pins BCLK=%d WS=%d DIN=%d %s%s\n",
+                kI2SApiName,
+                (unsigned long)s_sampleRateHz,
+                I2S_BCLK_PIN,
+                I2S_WS_PIN,
+                I2S_DIN_PIN,
+                s_i2sOk ? "OK" : "FAIL",
+                usedFallback ? " (fallback)" : "");
 
   if (!s_i2sOk) {
     // Fall back to fake pulses so the project still runs.
@@ -250,6 +319,8 @@ void processAudio() {
     s_audioTelemetry.rise = 0.0f;
     s_audioTelemetry.threshold = 0.0f;
     s_audioTelemetry.riseThreshold = 0.0f;
+    s_audioTelemetry.micRms = 0.0f;
+    s_audioTelemetry.micPeak = 0.0f;
     s_audioTelemetry.intervalOk = false;
     s_audioTelemetry.above = false;
     s_audioTelemetry.rising = false;
@@ -261,35 +332,58 @@ void processAudio() {
     return;
   }
 
+  s_audioTelemetry.i2sOk = true;
   const size_t wantBytes = sizeof(s_i2sRaw);
-  const size_t gotBytes = readI2SBytes(s_i2sRaw, wantBytes);
-  if (gotBytes < wantBytes) {
+  const size_t space = wantBytes - s_i2sBytesFilled;
+  const size_t gotBytes = readI2SBytes(((uint8_t*)s_i2sRaw) + s_i2sBytesFilled, space);
+  if (gotBytes == 0) {
+    // No data yet.
+    return;
+  }
+  s_i2sBytesFilled += gotBytes;
+  if (s_i2sBytesFilled < wantBytes) {
     // Not enough data yet.
     return;
   }
+  s_i2sBytesFilled = 0;
+
+  if (!s_dspReady) {
+    initDsp();
+    if (!s_dspReady) {
+      s_audioTelemetry.i2sOk = false;
+      return;
+    }
+  }
 
   // Convert raw I2S words into a mono buffer (choose left or right slot).
-  double mean = 0.0;
+  float mean = 0.0f;
   for (uint16_t i = 0; i < kFftSamples; i++) {
     const int32_t w = s_i2sRaw[(i * 2) + (SPH0645_CHANNEL ? 1 : 0)];
     const int32_t s = (SPH0645_RAW_SHIFT > 0) ? (w >> SPH0645_RAW_SHIFT) : w;
-    s_vReal[i] = (double)s;
-    s_vImag[i] = 0.0;
-    mean += s_vReal[i];
+    const float sample = (float)s;
+    s_fftBuffer[(i * 2) + 0] = sample;
+    s_fftBuffer[(i * 2) + 1] = 0.0f;
+    mean += sample;
   }
 
-  // DC removal (simple mean subtraction).
-  mean /= (double)kFftSamples;
+  // DC removal + windowing (also compute raw mic level).
+  mean /= (float)kFftSamples;
+  float micPeak = 0.0f;
+  double micSumSq = 0.0;
   for (uint16_t i = 0; i < kFftSamples; i++) {
-    s_vReal[i] -= mean;
+    const float centered = s_fftBuffer[(i * 2) + 0] - mean;
+    const float absVal = fabsf(centered);
+    if (absVal > micPeak) micPeak = absVal;
+    micSumSq += (double)centered * (double)centered;
+    s_fftBuffer[(i * 2) + 0] = centered * s_window[i];
   }
+  const float micRms = sqrtf((float)(micSumSq / (double)kFftSamples));
 
   // FFT
-  s_fft.windowing(FFTWindow::Hamming, FFTDirection::Forward);
-  s_fft.compute(FFTDirection::Forward);
-  s_fft.complexToMagnitude();
+  dsps_fft2r_fc32(s_fftBuffer, kFftSamples);
+  dsps_bit_rev_fc32(s_fftBuffer, kFftSamples);
 
-  // Bass energy from magnitude bins
+  // Bass energy + spectral flux from magnitude bins
   const uint16_t maxBin = (kFftSamples >> 1) - 1;
   uint16_t binMin = (uint16_t)((kBassMinHz * (float)kFftSamples) / (float)s_sampleRateHz);
   uint16_t binMax = (uint16_t)((kBassMaxHz * (float)kFftSamples) / (float)s_sampleRateHz);
@@ -297,31 +391,40 @@ void processAudio() {
   if (binMax > maxBin) binMax = maxBin;
 
   float bass = 0.0f;
+  float flux = 0.0f;
   for (uint16_t b = binMin; b <= binMax; b++) {
-    const float m = (float)s_vReal[b];
+    const float re = s_fftBuffer[(b * 2) + 0];
+    const float im = s_fftBuffer[(b * 2) + 1];
+    const float m = sqrtf((re * re) + (im * im));
     bass += m;
+    const float diff = m - s_prevMag[b];
+    if (diff > 0.0f) flux += diff;
+    s_prevMag[b] = m;
   }
 
-  // Smooth baseline
+  // Smooth baselines
   if (s_bassEma <= 0.0001f) s_bassEma = bass;
-  s_bassEma = (1.0f - kEmaAlpha) * s_bassEma + kEmaAlpha * bass;
+  s_bassEma = (1.0f - s_beatConfig.energyEmaAlpha) * s_bassEma + s_beatConfig.energyEmaAlpha * bass;
+  if (s_fluxEma <= 0.0001f) s_fluxEma = flux;
+  s_fluxEma = (1.0f - s_beatConfig.fluxEmaAlpha) * s_fluxEma + s_beatConfig.fluxEmaAlpha * flux;
 
   // Beat decision
   const uint32_t now = millis();
-  const float rise = bass - s_prevBass;
   const uint32_t intervalMs = (s_lastBeatMs > 0) ? (now - s_lastBeatMs) : 0;
-  const bool intervalOk = (now - s_lastBeatMs) >= kMinBeatIntervalMs;
-  const bool above = bass > (s_bassEma * kBeatThreshold);
-  const bool rising = rise > (s_bassEma * kBeatRiseFactor);
+  const bool intervalOk = (now - s_lastBeatMs) >= s_beatConfig.minBeatIntervalMs;
+  const float rise = flux - s_prevFlux;
+  const bool above = flux > (s_fluxEma * s_beatConfig.fluxThreshold);
+  const bool rising = rise > (s_fluxEma * s_beatConfig.fluxRiseFactor);
 
-  const float ratio = bass / (s_bassEma + 1e-3f);
-  s_audioTelemetry.i2sOk = true;
+  const float ratio = flux / (s_fluxEma + 1e-3f);
   s_audioTelemetry.bass = bass;
   s_audioTelemetry.bassEma = s_bassEma;
   s_audioTelemetry.ratio = ratio;
   s_audioTelemetry.rise = rise;
-  s_audioTelemetry.threshold = s_bassEma * kBeatThreshold;
-  s_audioTelemetry.riseThreshold = s_bassEma * kBeatRiseFactor;
+  s_audioTelemetry.threshold = s_fluxEma * s_beatConfig.fluxThreshold;
+  s_audioTelemetry.riseThreshold = s_fluxEma * s_beatConfig.fluxRiseFactor;
+  s_audioTelemetry.micRms = micRms;
+  s_audioTelemetry.micPeak = micPeak;
   s_audioTelemetry.intervalOk = intervalOk;
   s_audioTelemetry.above = above;
   s_audioTelemetry.rising = rising;
@@ -332,7 +435,7 @@ void processAudio() {
   s_audioTelemetry.beatStrength = 0.0f;
 
   if (intervalOk && above && rising) {
-    const float strength = clamp01((ratio - kBeatThreshold) / kBeatThreshold);
+    const float strength = clamp01((ratio - s_beatConfig.fluxThreshold) / s_beatConfig.fluxThreshold);
 
     s_beatPending = true;
     s_beatStrength = strength;
@@ -350,7 +453,7 @@ void processAudio() {
     if (brightnessPulse < pulse) brightnessPulse = pulse;
   }
 
-  s_prevBass = bass;
+  s_prevFlux = flux;
 
   if (brightnessPulse < 1.0f) brightnessPulse = 1.0f;
 #else
@@ -382,6 +485,8 @@ void setupI2S() {
   s_audioTelemetry.bassMinHz = kBassMinHz;
   s_audioTelemetry.bassMaxHz = kBassMaxHz;
   s_audioTelemetry.binWidthHz = (float)s_sampleRateHz / (float)kFftSamples;
+  s_audioTelemetry.micRms = 0.0f;
+  s_audioTelemetry.micPeak = 0.0f;
   s_audioTelemetry.i2sOk = false;
   Serial.println("ESP_I2S.h not available; audio disabled");
 }

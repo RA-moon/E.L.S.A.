@@ -34,6 +34,8 @@ struct AudioTelemetry {
   float rise;
   float threshold;
   float riseThreshold;
+  float micRms;
+  float micPeak;
   float beatStrength;
   uint32_t lastBeatMs;
   uint32_t lastBeatIntervalMs;
@@ -50,4 +52,16 @@ struct AudioTelemetry {
   bool i2sOk;
 };
 
+struct BeatDetectorConfig {
+  float energyEmaAlpha;
+  float fluxEmaAlpha;
+  float fluxThreshold;
+  float fluxRiseFactor;
+  uint32_t minBeatIntervalMs;
+  uint32_t avgBeatMinMs;
+  uint32_t avgBeatMaxMs;
+};
+
 void getAudioTelemetry(AudioTelemetry* out);
+void getBeatDetectorConfig(BeatDetectorConfig* out);
+void setBeatDetectorConfig(const BeatDetectorConfig* cfg);

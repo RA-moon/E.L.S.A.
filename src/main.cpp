@@ -112,6 +112,13 @@ struct RuntimeConfig {
   bool enableFallbackWaves;
   bool animationAuto;
   int animationIndex;
+  float energyEmaAlpha;
+  float fluxEmaAlpha;
+  float fluxThreshold;
+  float fluxRiseFactor;
+  uint16_t minBeatIntervalMs;
+  uint16_t avgBeatMinMs;
+  uint16_t avgBeatMaxMs;
 };
 
 static RuntimeConfig g_config = {
@@ -123,7 +130,14 @@ static RuntimeConfig g_config = {
   (ENABLE_BEAT_WAVES != 0),
   (ENABLE_FALLBACK_WAVES != 0),
   true,
-  0
+  0,
+  0.10f,
+  0.20f,
+  1.7f,
+  0.12f,
+  120,
+  180,
+  2000
 };
 
 #if ENABLE_WEB_TELEMETRY
@@ -194,6 +208,15 @@ static bool parseLongArg(const String& value, long* out) {
   return true;
 }
 
+static bool parseFloatArg(const String& value, float* out) {
+  if (value.length() == 0) return false;
+  char* endPtr = nullptr;
+  const float parsed = strtof(value.c_str(), &endPtr);
+  if (endPtr == value.c_str()) return false;
+  *out = parsed;
+  return true;
+}
+
 static bool parseBoolArg(const String& value, bool* out) {
   if (value.length() == 0) return false;
   if (value == "1" || value == "true" || value == "on" || value == "yes") {
@@ -218,6 +241,22 @@ static void normalizeConfig() {
   }
   g_config.fallbackMs = clampU16((long)g_config.fallbackMs, 0, 10000);
   g_config.maxActiveWaves = clampU8((int)g_config.maxActiveWaves, 1, 100);
+  if (g_config.energyEmaAlpha < 0.01f) g_config.energyEmaAlpha = 0.01f;
+  if (g_config.energyEmaAlpha > 0.5f) g_config.energyEmaAlpha = 0.5f;
+  if (g_config.fluxEmaAlpha < 0.01f) g_config.fluxEmaAlpha = 0.01f;
+  if (g_config.fluxEmaAlpha > 0.6f) g_config.fluxEmaAlpha = 0.6f;
+  if (g_config.fluxThreshold < 1.1f) g_config.fluxThreshold = 1.1f;
+  if (g_config.fluxThreshold > 4.0f) g_config.fluxThreshold = 4.0f;
+  if (g_config.fluxRiseFactor < 0.02f) g_config.fluxRiseFactor = 0.02f;
+  if (g_config.fluxRiseFactor > 0.6f) g_config.fluxRiseFactor = 0.6f;
+  g_config.minBeatIntervalMs = clampU16((long)g_config.minBeatIntervalMs, 80, 1000);
+  g_config.avgBeatMinMs = clampU16((long)g_config.avgBeatMinMs, 100, 1200);
+  g_config.avgBeatMaxMs = clampU16((long)g_config.avgBeatMaxMs, 500, 5000);
+  if (g_config.avgBeatMinMs > g_config.avgBeatMaxMs) {
+    const uint16_t tmp = g_config.avgBeatMinMs;
+    g_config.avgBeatMinMs = g_config.avgBeatMaxMs;
+    g_config.avgBeatMaxMs = tmp;
+  }
 
   const int animCount = getAnimationCount();
   if (animCount > 0) {
@@ -231,6 +270,18 @@ static void normalizeConfig() {
 static void applyAnimationConfig() {
   setAnimationAutoMode(g_config.animationAuto);
   setAnimationIndex(g_config.animationIndex);
+}
+
+static void applyBeatConfig() {
+  BeatDetectorConfig cfg = {};
+  cfg.energyEmaAlpha = g_config.energyEmaAlpha;
+  cfg.fluxEmaAlpha = g_config.fluxEmaAlpha;
+  cfg.fluxThreshold = g_config.fluxThreshold;
+  cfg.fluxRiseFactor = g_config.fluxRiseFactor;
+  cfg.minBeatIntervalMs = g_config.minBeatIntervalMs;
+  cfg.avgBeatMinMs = g_config.avgBeatMinMs;
+  cfg.avgBeatMaxMs = g_config.avgBeatMaxMs;
+  setBeatDetectorConfig(&cfg);
 }
 
 static inline float beatEnvelope(float beatPeriodMs, uint32_t nowMs) {
@@ -302,18 +353,39 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         <label for="max-waves">Max waves</label>
         <input type="number" id="max-waves" name="maxWaves" min="1" max="100" step="1" />
       </div>
-      <div class="row">
-        <label for="mode">Animation mode</label>
-        <select id="mode" name="mode">
-          <option value="auto">auto</option>
-          <option value="fixed">fixed</option>
-        </select>
-        <label for="anim">Animation</label>
-        <select id="anim" name="anim"></select>
-      </div>
+    <div class="row">
+      <label for="mode">Animation mode</label>
+      <select id="mode" name="mode">
+        <option value="auto">auto</option>
+        <option value="fixed">fixed</option>
+      </select>
+      <label for="anim">Animation</label>
+      <select id="anim" name="anim"></select>
+      <button type="button" id="anim-toggle">Auto: ON</button>
+    </div>
       <div class="row">
         <label><input type="checkbox" id="beat-waves" /> Beat waves</label>
         <label><input type="checkbox" id="fallback-waves" /> Fallback waves</label>
+      </div>
+      <div class="row">
+        <label for="energy-ema">Energy EMA</label>
+        <input type="number" id="energy-ema" name="energyEmaAlpha" min="0.01" max="0.50" step="0.01" />
+        <label for="flux-ema">Flux EMA</label>
+        <input type="number" id="flux-ema" name="fluxEmaAlpha" min="0.01" max="0.60" step="0.01" />
+      </div>
+      <div class="row">
+        <label for="flux-threshold">Flux threshold</label>
+        <input type="number" id="flux-threshold" name="fluxThreshold" min="1.1" max="4.0" step="0.05" />
+        <label for="flux-rise">Flux rise</label>
+        <input type="number" id="flux-rise" name="fluxRiseFactor" min="0.02" max="0.60" step="0.01" />
+      </div>
+      <div class="row">
+        <label for="min-interval">Min beat interval (ms)</label>
+        <input type="number" id="min-interval" name="minBeatIntervalMs" min="80" max="1000" step="10" />
+        <label for="avg-min">Avg beat min (ms)</label>
+        <input type="number" id="avg-min" name="avgBeatMinMs" min="100" max="1200" step="10" />
+        <label for="avg-max">Avg beat max (ms)</label>
+        <input type="number" id="avg-max" name="avgBeatMaxMs" min="500" max="5000" step="50" />
       </div>
       <div class="row">
         <button type="submit">Apply</button>
@@ -335,8 +407,16 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       const maxWavesInput = document.getElementById('max-waves');
       const modeSelect = document.getElementById('mode');
       const animSelect = document.getElementById('anim');
+      const animToggle = document.getElementById('anim-toggle');
       const beatWavesInput = document.getElementById('beat-waves');
       const fallbackWavesInput = document.getElementById('fallback-waves');
+      const energyEmaInput = document.getElementById('energy-ema');
+      const fluxEmaInput = document.getElementById('flux-ema');
+      const fluxThresholdInput = document.getElementById('flux-threshold');
+      const fluxRiseInput = document.getElementById('flux-rise');
+      const minIntervalInput = document.getElementById('min-interval');
+      const avgMinInput = document.getElementById('avg-min');
+      const avgMaxInput = document.getElementById('avg-max');
       const configStatus = document.getElementById('config-status');
 
       let ledCount = 120;
@@ -381,6 +461,16 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           if (data.animation.index !== undefined) animSelect.value = data.animation.index;
           animSelect.disabled = (modeSelect.value === 'auto');
         }
+        if (data.beat) {
+          if (data.beat.energyEmaAlpha !== undefined) energyEmaInput.value = data.beat.energyEmaAlpha;
+          if (data.beat.fluxEmaAlpha !== undefined) fluxEmaInput.value = data.beat.fluxEmaAlpha;
+          if (data.beat.fluxThreshold !== undefined) fluxThresholdInput.value = data.beat.fluxThreshold;
+          if (data.beat.fluxRiseFactor !== undefined) fluxRiseInput.value = data.beat.fluxRiseFactor;
+          if (data.beat.minBeatIntervalMs !== undefined) minIntervalInput.value = data.beat.minBeatIntervalMs;
+          if (data.beat.avgBeatMinMs !== undefined) avgMinInput.value = data.beat.avgBeatMinMs;
+          if (data.beat.avgBeatMaxMs !== undefined) avgMaxInput.value = data.beat.avgBeatMaxMs;
+        }
+        animToggle.textContent = (modeSelect.value === 'auto') ? 'Auto: ON' : 'Auto: OFF';
       }
 
       async function fetchConfig() {
@@ -445,10 +535,10 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       brightnessInput.addEventListener('input', updateBrightnessLabel);
       modeSelect.addEventListener('change', () => {
         animSelect.disabled = (modeSelect.value === 'auto');
+        animToggle.textContent = (modeSelect.value === 'auto') ? 'Auto: ON' : 'Auto: OFF';
       });
 
-      configForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
+      async function applyConfig() {
         const params = new URLSearchParams(new FormData(configForm));
         params.set('beatWaves', beatWavesInput.checked ? '1' : '0');
         params.set('fallbackWaves', fallbackWavesInput.checked ? '1' : '0');
@@ -462,6 +552,39 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         } catch (err) {
           configStatus.textContent = 'update failed';
         }
+      }
+
+      configForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        applyConfig();
+      });
+
+      let tapTimer = null;
+      let lastTap = 0;
+      animToggle.addEventListener('click', () => {
+        const now = Date.now();
+        if (now - lastTap < 350) {
+          lastTap = 0;
+          if (tapTimer) {
+            clearTimeout(tapTimer);
+            tapTimer = null;
+          }
+          modeSelect.value = (modeSelect.value === 'auto') ? 'fixed' : 'auto';
+          animSelect.disabled = (modeSelect.value === 'auto');
+          animToggle.textContent = (modeSelect.value === 'auto') ? 'Auto: ON' : 'Auto: OFF';
+          applyConfig();
+          return;
+        }
+
+        lastTap = now;
+        tapTimer = setTimeout(() => {
+          tapTimer = null;
+          if (modeSelect.value !== 'auto' && animSelect.options.length > 0) {
+            const next = (parseInt(animSelect.value || '0', 10) + 1) % animSelect.options.length;
+            animSelect.value = String(next);
+            applyConfig();
+          }
+        }, 350);
       });
 
       fetchStatus();
@@ -510,6 +633,30 @@ static bool updateConfigFromRequest() {
     g_config.enableFallbackWaves = boolValue;
     changed = true;
   }
+  if (server.hasArg("energyEmaAlpha") && parseFloatArg(server.arg("energyEmaAlpha"), &g_config.energyEmaAlpha)) {
+    changed = true;
+  }
+  if (server.hasArg("fluxEmaAlpha") && parseFloatArg(server.arg("fluxEmaAlpha"), &g_config.fluxEmaAlpha)) {
+    changed = true;
+  }
+  if (server.hasArg("fluxThreshold") && parseFloatArg(server.arg("fluxThreshold"), &g_config.fluxThreshold)) {
+    changed = true;
+  }
+  if (server.hasArg("fluxRiseFactor") && parseFloatArg(server.arg("fluxRiseFactor"), &g_config.fluxRiseFactor)) {
+    changed = true;
+  }
+  if (server.hasArg("minBeatIntervalMs") && parseLongArg(server.arg("minBeatIntervalMs"), &value)) {
+    g_config.minBeatIntervalMs = clampU16(value, 80, 1000);
+    changed = true;
+  }
+  if (server.hasArg("avgBeatMinMs") && parseLongArg(server.arg("avgBeatMinMs"), &value)) {
+    g_config.avgBeatMinMs = clampU16(value, 100, 1200);
+    changed = true;
+  }
+  if (server.hasArg("avgBeatMaxMs") && parseLongArg(server.arg("avgBeatMaxMs"), &value)) {
+    g_config.avgBeatMaxMs = clampU16(value, 500, 5000);
+    changed = true;
+  }
   if (server.hasArg("mode")) {
     const String mode = server.arg("mode");
     if (mode == "auto" || mode == "1") {
@@ -528,6 +675,7 @@ static bool updateConfigFromRequest() {
   normalizeConfig();
   if (changed) {
     applyAnimationConfig();
+    applyBeatConfig();
     updateAnimationSwitch();
   }
 
@@ -546,6 +694,14 @@ static String buildConfigJson() {
   json += ",\"maxActiveWaves\":" + String(g_config.maxActiveWaves);
   json += ",\"enableBeatWaves\":" + String(g_config.enableBeatWaves ? 1 : 0);
   json += ",\"enableFallbackWaves\":" + String(g_config.enableFallbackWaves ? 1 : 0);
+  json += ",\"beat\":{\"energyEmaAlpha\":" + String(g_config.energyEmaAlpha, 3);
+  json += ",\"fluxEmaAlpha\":" + String(g_config.fluxEmaAlpha, 3);
+  json += ",\"fluxThreshold\":" + String(g_config.fluxThreshold, 3);
+  json += ",\"fluxRiseFactor\":" + String(g_config.fluxRiseFactor, 3);
+  json += ",\"minBeatIntervalMs\":" + String(g_config.minBeatIntervalMs);
+  json += ",\"avgBeatMinMs\":" + String(g_config.avgBeatMinMs);
+  json += ",\"avgBeatMaxMs\":" + String(g_config.avgBeatMaxMs);
+  json += "}";
   json += ",\"animation\":{\"mode\":\"";
   json += (g_config.animationAuto ? "auto" : "fixed");
   json += "\",\"index\":" + String(getCurrentAnimationIndex());
@@ -587,6 +743,7 @@ static void handleStatus() {
     "\"animation\":{\"index\":%d,\"name\":\"%s\"},"
     "\"audio\":{\"i2sOk\":%u,\"bass\":%.2f,\"bassEma\":%.2f,\"ratio\":%.2f,"
     "\"rise\":%.2f,\"threshold\":%.2f,\"riseThreshold\":%.2f,"
+    "\"micRms\":%.2f,\"micPeak\":%.2f,"
     "\"intervalOk\":%u,\"above\":%u,\"rising\":%u,\"lastBeatIntervalMs\":%lu,"
     "\"fft\":{\"sampleRateHz\":%lu,\"samples\":%u,\"binWidthHz\":%.2f,"
     "\"bassMinHz\":%.1f,\"bassMaxHz\":%.1f,\"binMin\":%u,\"binMax\":%u}}}",
@@ -608,6 +765,8 @@ static void handleStatus() {
     audio.rise,
     audio.threshold,
     audio.riseThreshold,
+    audio.micRms,
+    audio.micPeak,
     (unsigned)(audio.intervalOk ? 1 : 0),
     (unsigned)(audio.above ? 1 : 0),
     (unsigned)(audio.rising ? 1 : 0),
@@ -841,6 +1000,7 @@ void setup() {
   resetWaves();
   normalizeConfig();
   applyAnimationConfig();
+  applyBeatConfig();
 
   // Simple entropy seed (works without ADC wiring).
   randomSeed((uint32_t)micros());
