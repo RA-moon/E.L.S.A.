@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "animtated_circles.h"
 #include "animtated_lines.h"
@@ -52,12 +53,6 @@
 // Minimum gap between /frame responses (ms). Increase if animation stutters.
 #define FRAME_MIN_INTERVAL_MS 12
 
-// ESP32-S3 tuning (override if you want different trade-offs).
-#if defined(ARDUINO_ESP32S3_DEV) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ESP32S3)
-#define AUDIO_SAMPLE_RATE_HZ 48000
-#define AUDIO_FFT_SAMPLES    1024
-#endif
-
 #ifndef WIFI_SSID
 #define WIFI_SSID ""
 #endif
@@ -81,6 +76,20 @@
 // Serial debug print on every beat
 #define DEBUG_BEAT_TIMING     0
 
+// Performance profiling (averages printed to Serial).
+#define PROFILE_PERF          0
+#define PROFILE_INTERVAL_MS   2000
+
+#if PROFILE_PERF
+static uint64_t s_audioAccumUs = 0;
+static uint32_t s_audioCount = 0;
+static uint64_t s_animAccumUs = 0;
+static uint32_t s_animCount = 0;
+static uint64_t s_showAccumUs = 0;
+static uint32_t s_showCount = 0;
+static uint32_t s_lastProfileMs = 0;
+#endif
+
 Adafruit_NeoPixel strip1(NUM_LEDS1, DATA_PIN1, NEO_GRB + NEO_KHZ800);
 
 #if ENABLE_HAIR_STRIP
@@ -92,6 +101,30 @@ static uint32_t lastAudioTime = 0;
 
 // Beat envelope state
 static uint32_t lastBeatMs = 0;
+
+struct RuntimeConfig {
+  uint8_t brightness;
+  uint16_t beatDecayMinMs;
+  uint16_t beatDecayMaxMs;
+  uint16_t fallbackMs;
+  uint8_t maxActiveWaves;
+  bool enableBeatWaves;
+  bool enableFallbackWaves;
+  bool animationAuto;
+  int animationIndex;
+};
+
+static RuntimeConfig g_config = {
+  BRIGHTNESS1,
+  BEAT_DECAY_MIN_MS,
+  BEAT_DECAY_MAX_MS,
+  NO_BEAT_FALLBACK_MS,
+  MAX_ACTIVE_WAVES,
+  (ENABLE_BEAT_WAVES != 0),
+  (ENABLE_FALLBACK_WAVES != 0),
+  true,
+  0
+};
 
 #if ENABLE_WEB_TELEMETRY
 struct BeatTelemetry {
@@ -121,6 +154,7 @@ static uint32_t lastFrameSendMs = 0;
 static void handleRoot();
 static void handleStatus();
 static void handleFrame();
+static void handleConfig();
 static bool setupWiFi();
 static void setupWebServer();
 static void pollWebServer();
@@ -137,6 +171,66 @@ static inline float clamp01(float x) {
   if (x < 0.0f) return 0.0f;
   if (x > 1.0f) return 1.0f;
   return x;
+}
+
+static inline uint8_t clampU8(int value, int lo, int hi) {
+  if (value < lo) return (uint8_t)lo;
+  if (value > hi) return (uint8_t)hi;
+  return (uint8_t)value;
+}
+
+static inline uint16_t clampU16(long value, long lo, long hi) {
+  if (value < lo) return (uint16_t)lo;
+  if (value > hi) return (uint16_t)hi;
+  return (uint16_t)value;
+}
+
+static bool parseLongArg(const String& value, long* out) {
+  if (value.length() == 0) return false;
+  char* endPtr = nullptr;
+  const long parsed = strtol(value.c_str(), &endPtr, 10);
+  if (endPtr == value.c_str()) return false;
+  *out = parsed;
+  return true;
+}
+
+static bool parseBoolArg(const String& value, bool* out) {
+  if (value.length() == 0) return false;
+  if (value == "1" || value == "true" || value == "on" || value == "yes") {
+    *out = true;
+    return true;
+  }
+  if (value == "0" || value == "false" || value == "off" || value == "no") {
+    *out = false;
+    return true;
+  }
+  return false;
+}
+
+static void normalizeConfig() {
+  g_config.brightness = clampU8((int)g_config.brightness, 0, 255);
+  g_config.beatDecayMinMs = clampU16((long)g_config.beatDecayMinMs, 50, 5000);
+  g_config.beatDecayMaxMs = clampU16((long)g_config.beatDecayMaxMs, 50, 10000);
+  if (g_config.beatDecayMinMs > g_config.beatDecayMaxMs) {
+    const uint16_t tmp = g_config.beatDecayMinMs;
+    g_config.beatDecayMinMs = g_config.beatDecayMaxMs;
+    g_config.beatDecayMaxMs = tmp;
+  }
+  g_config.fallbackMs = clampU16((long)g_config.fallbackMs, 0, 10000);
+  g_config.maxActiveWaves = clampU8((int)g_config.maxActiveWaves, 1, 100);
+
+  const int animCount = getAnimationCount();
+  if (animCount > 0) {
+    if (g_config.animationIndex < 0) g_config.animationIndex = 0;
+    if (g_config.animationIndex >= animCount) g_config.animationIndex = animCount - 1;
+  } else {
+    g_config.animationIndex = 0;
+  }
+}
+
+static void applyAnimationConfig() {
+  setAnimationAutoMode(g_config.animationAuto);
+  setAnimationIndex(g_config.animationIndex);
 }
 
 static inline float beatEnvelope(float beatPeriodMs, uint32_t nowMs) {
@@ -167,6 +261,14 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       .muted { color: #8b96a8; font-size: 12px; }
       #strip { width: 100%; height: 60px; image-rendering: pixelated; border-radius: 8px; background: #0b0e13; }
       .row { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
+      form { background: #151a22; padding: 16px; border-radius: 10px; margin-top: 16px; }
+      label { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex: 1; }
+      input[type="number"], select { background: #0b0e13; color: #e8eef7; border: 1px solid #2a3342; border-radius: 6px; padding: 4px 8px; }
+      input[type="range"] { width: 180px; }
+      button { background: #2b6cb0; color: #ffffff; border: none; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+      button:disabled { opacity: 0.6; cursor: default; }
+      .small { color: #8b96a8; font-size: 12px; }
+      .col { display: flex; flex-direction: column; gap: 4px; flex: 1; }
     </style>
   </head>
   <body>
@@ -177,12 +279,65 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       <div class="muted" id="fps">frame interval: -- ms</div>
     </div>
     <canvas id="strip" width="120" height="1"></canvas>
+    <form id="config-form">
+      <div class="row">
+        <div class="col">
+          <label for="brightness">Brightness</label>
+          <input type="range" id="brightness" name="brightness" min="0" max="255" step="1" />
+        </div>
+        <div class="col">
+          <div class="small">value</div>
+          <div id="brightness-value">--</div>
+        </div>
+      </div>
+      <div class="row">
+        <label for="beat-min">Beat decay min (ms)</label>
+        <input type="number" id="beat-min" name="beatMin" min="50" max="5000" step="10" />
+        <label for="beat-max">Beat decay max (ms)</label>
+        <input type="number" id="beat-max" name="beatMax" min="50" max="10000" step="10" />
+      </div>
+      <div class="row">
+        <label for="fallback-ms">No-beat fallback (ms)</label>
+        <input type="number" id="fallback-ms" name="fallbackMs" min="0" max="10000" step="50" />
+        <label for="max-waves">Max waves</label>
+        <input type="number" id="max-waves" name="maxWaves" min="1" max="100" step="1" />
+      </div>
+      <div class="row">
+        <label for="mode">Animation mode</label>
+        <select id="mode" name="mode">
+          <option value="auto">auto</option>
+          <option value="fixed">fixed</option>
+        </select>
+        <label for="anim">Animation</label>
+        <select id="anim" name="anim"></select>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="beat-waves" /> Beat waves</label>
+        <label><input type="checkbox" id="fallback-waves" /> Fallback waves</label>
+      </div>
+      <div class="row">
+        <button type="submit">Apply</button>
+        <div class="small" id="config-status"></div>
+      </div>
+    </form>
     <pre id="payload">waiting...</pre>
     <script>
       const payloadEl = document.getElementById('payload');
       const fpsEl = document.getElementById('fps');
       const strip = document.getElementById('strip');
       const ctx = strip.getContext('2d');
+      const configForm = document.getElementById('config-form');
+      const brightnessInput = document.getElementById('brightness');
+      const brightnessValue = document.getElementById('brightness-value');
+      const beatMinInput = document.getElementById('beat-min');
+      const beatMaxInput = document.getElementById('beat-max');
+      const fallbackInput = document.getElementById('fallback-ms');
+      const maxWavesInput = document.getElementById('max-waves');
+      const modeSelect = document.getElementById('mode');
+      const animSelect = document.getElementById('anim');
+      const beatWavesInput = document.getElementById('beat-waves');
+      const fallbackWavesInput = document.getElementById('fallback-waves');
+      const configStatus = document.getElementById('config-status');
 
       let ledCount = 120;
       let frameBytes = ledCount * 3;
@@ -196,6 +351,46 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         strip.width = ledCount;
         strip.height = 1;
         imageData = ctx.createImageData(ledCount, 1);
+      }
+
+      function updateBrightnessLabel() {
+        brightnessValue.textContent = brightnessInput.value;
+      }
+
+      function setConfigUI(data) {
+        if (!data) return;
+        brightnessInput.value = data.brightness ?? brightnessInput.value;
+        updateBrightnessLabel();
+        if (data.beatDecayMinMs !== undefined) beatMinInput.value = data.beatDecayMinMs;
+        if (data.beatDecayMaxMs !== undefined) beatMaxInput.value = data.beatDecayMaxMs;
+        if (data.fallbackMs !== undefined) fallbackInput.value = data.fallbackMs;
+        if (data.maxActiveWaves !== undefined) maxWavesInput.value = data.maxActiveWaves;
+        if (data.enableBeatWaves !== undefined) beatWavesInput.checked = !!data.enableBeatWaves;
+        if (data.enableFallbackWaves !== undefined) fallbackWavesInput.checked = !!data.enableFallbackWaves;
+
+        if (data.animation) {
+          if (data.animation.mode) modeSelect.value = data.animation.mode;
+          const list = data.animations || [];
+          animSelect.innerHTML = '';
+          list.forEach((name, idx) => {
+            const opt = document.createElement('option');
+            opt.value = idx;
+            opt.textContent = name;
+            animSelect.appendChild(opt);
+          });
+          if (data.animation.index !== undefined) animSelect.value = data.animation.index;
+          animSelect.disabled = (modeSelect.value === 'auto');
+        }
+      }
+
+      async function fetchConfig() {
+        try {
+          const res = await fetch('/config', { cache: 'no-store' });
+          const data = await res.json();
+          setConfigUI(data);
+        } catch (err) {
+          configStatus.textContent = 'config error';
+        }
       }
 
       async function fetchStatus() {
@@ -247,7 +442,30 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         setTimeout(frameTick, Math.max(0, intervalMs - elapsed));
       }
 
+      brightnessInput.addEventListener('input', updateBrightnessLabel);
+      modeSelect.addEventListener('change', () => {
+        animSelect.disabled = (modeSelect.value === 'auto');
+      });
+
+      configForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const params = new URLSearchParams(new FormData(configForm));
+        params.set('beatWaves', beatWavesInput.checked ? '1' : '0');
+        params.set('fallbackWaves', fallbackWavesInput.checked ? '1' : '0');
+        const url = '/config?' + params.toString();
+        configStatus.textContent = 'updating...';
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          const data = await res.json();
+          setConfigUI(data);
+          configStatus.textContent = 'updated';
+        } catch (err) {
+          configStatus.textContent = 'update failed';
+        }
+      });
+
       fetchStatus();
+      fetchConfig();
       setInterval(fetchStatus, 1000);
       frameTick();
     </script>
@@ -257,6 +475,98 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
 
 static void handleRoot() {
   server.send_P(200, "text/html", kIndexHtml);
+}
+
+static bool updateConfigFromRequest() {
+  bool changed = false;
+  long value = 0;
+  bool boolValue = false;
+
+  if (server.hasArg("brightness") && parseLongArg(server.arg("brightness"), &value)) {
+    g_config.brightness = clampU8((int)value, 0, 255);
+    changed = true;
+  }
+  if (server.hasArg("beatMin") && parseLongArg(server.arg("beatMin"), &value)) {
+    g_config.beatDecayMinMs = clampU16(value, 50, 5000);
+    changed = true;
+  }
+  if (server.hasArg("beatMax") && parseLongArg(server.arg("beatMax"), &value)) {
+    g_config.beatDecayMaxMs = clampU16(value, 50, 10000);
+    changed = true;
+  }
+  if (server.hasArg("fallbackMs") && parseLongArg(server.arg("fallbackMs"), &value)) {
+    g_config.fallbackMs = clampU16(value, 0, 10000);
+    changed = true;
+  }
+  if (server.hasArg("maxWaves") && parseLongArg(server.arg("maxWaves"), &value)) {
+    g_config.maxActiveWaves = clampU8((int)value, 1, 100);
+    changed = true;
+  }
+  if (server.hasArg("beatWaves") && parseBoolArg(server.arg("beatWaves"), &boolValue)) {
+    g_config.enableBeatWaves = boolValue;
+    changed = true;
+  }
+  if (server.hasArg("fallbackWaves") && parseBoolArg(server.arg("fallbackWaves"), &boolValue)) {
+    g_config.enableFallbackWaves = boolValue;
+    changed = true;
+  }
+  if (server.hasArg("mode")) {
+    const String mode = server.arg("mode");
+    if (mode == "auto" || mode == "1") {
+      g_config.animationAuto = true;
+      changed = true;
+    } else if (mode == "fixed" || mode == "manual" || mode == "0") {
+      g_config.animationAuto = false;
+      changed = true;
+    }
+  }
+  if (server.hasArg("anim") && parseLongArg(server.arg("anim"), &value)) {
+    g_config.animationIndex = (int)value;
+    changed = true;
+  }
+
+  normalizeConfig();
+  if (changed) {
+    applyAnimationConfig();
+    updateAnimationSwitch();
+  }
+
+  return changed;
+}
+
+static String buildConfigJson() {
+  const int animCount = getAnimationCount();
+  String json;
+  json.reserve(640);
+  json += "{";
+  json += "\"brightness\":" + String(g_config.brightness);
+  json += ",\"beatDecayMinMs\":" + String(g_config.beatDecayMinMs);
+  json += ",\"beatDecayMaxMs\":" + String(g_config.beatDecayMaxMs);
+  json += ",\"fallbackMs\":" + String(g_config.fallbackMs);
+  json += ",\"maxActiveWaves\":" + String(g_config.maxActiveWaves);
+  json += ",\"enableBeatWaves\":" + String(g_config.enableBeatWaves ? 1 : 0);
+  json += ",\"enableFallbackWaves\":" + String(g_config.enableFallbackWaves ? 1 : 0);
+  json += ",\"animation\":{\"mode\":\"";
+  json += (g_config.animationAuto ? "auto" : "fixed");
+  json += "\",\"index\":" + String(getCurrentAnimationIndex());
+  json += ",\"name\":\"" + String(getCurrentAnimationName()) + "\"}";
+  json += ",\"animations\":[";
+  for (int i = 0; i < animCount; i++) {
+    if (i > 0) json += ",";
+    json += "\"";
+    json += getAnimationNameByIndex(i);
+    json += "\"";
+  }
+  json += "]}";
+  return json;
+}
+
+static void handleConfig() {
+  updateConfigFromRequest();
+  const String json = buildConfigJson();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
 }
 
 static void handleStatus() {
@@ -377,6 +687,8 @@ static void setupWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/frame", HTTP_GET, handleFrame);
+  server.on("/config", HTTP_GET, handleConfig);
+  server.on("/config", HTTP_POST, handleConfig);
   server.onNotFound([]() {
     server.send(404, "text/plain", "not found");
   });
@@ -397,23 +709,26 @@ void runLedAnimation() {
 
 #if ENABLE_BEAT_WAVES
   float beatStrength = 0.0f;
-  const bool beatEvent = consumeBeat(&beatStrength);
-  if (beatEvent) {
-    lastBeatMs = now;
+  bool beatEvent = false;
+  if (g_config.enableBeatWaves) {
+    beatEvent = consumeBeat(&beatStrength);
+    if (beatEvent) {
+      lastBeatMs = now;
 
-    // Suppress the fallback timer right after a beat.
-    lastWaveTime = now;
+      // Suppress the fallback timer right after a beat.
+      lastWaveTime = now;
 
 #if ENABLE_WEB_TELEMETRY
-    telemetry.beatCount += 1;
-    telemetry.lastBeatMs = now;
-    telemetry.lastBeatStrength = beatStrength;
+      telemetry.beatCount += 1;
+      telemetry.lastBeatMs = now;
+      telemetry.lastBeatStrength = beatStrength;
 #endif
 
 #if DEBUG_BEAT_TIMING
-    Serial.printf("Beat: avg=%.0fms (%.1f BPM) strength=%.2f\n",
-                  getAverageBeatIntervalMs(), getAverageBpm(), beatStrength);
+      Serial.printf("Beat: avg=%.0fms (%.1f BPM) strength=%.2f\n",
+                    getAverageBeatIntervalMs(), getAverageBpm(), beatStrength);
 #endif
+    }
   }
 #else
   const bool beatEvent = false;
@@ -422,13 +737,13 @@ void runLedAnimation() {
 
   // Use the tempo estimate from the audio module.
   float beatPeriodMs = getAverageBeatIntervalMs();
-  if (beatPeriodMs < (float)BEAT_DECAY_MIN_MS) beatPeriodMs = (float)BEAT_DECAY_MIN_MS;
-  if (beatPeriodMs > (float)BEAT_DECAY_MAX_MS) beatPeriodMs = (float)BEAT_DECAY_MAX_MS;
+  if (beatPeriodMs < (float)g_config.beatDecayMinMs) beatPeriodMs = (float)g_config.beatDecayMinMs;
+  if (beatPeriodMs > (float)g_config.beatDecayMaxMs) beatPeriodMs = (float)g_config.beatDecayMaxMs;
 
   const float env = beatEnvelope(beatPeriodMs, now);
 
-  // Brightness for this frame: 255 on beat -> BRIGHTNESS1 at the end of the beat period.
-  int frameBrightness = BRIGHTNESS1 + (int)lroundf((255.0f - (float)BRIGHTNESS1) * env);
+  // Brightness for this frame: 255 on beat -> baseline at the end of the beat period.
+  int frameBrightness = g_config.brightness + (int)lroundf((255.0f - (float)g_config.brightness) * env);
   frameBrightness = constrain(frameBrightness, 0, 255);
 
   updateAnimationSwitch();
@@ -470,7 +785,7 @@ void runLedAnimation() {
 #if ENABLE_BEAT_WAVES
   // Beat-triggered wave injection.
   if (beatEvent) {
-    if (getWaves().size() < MAX_ACTIVE_WAVES) {
+    if (getWaves().size() < g_config.maxActiveWaves) {
       const uint32_t hue = (uint32_t)random(0, 65536);
       const int8_t speedCtl = (int8_t)constrain((int)(beatStrength * 25.0f) - 5, -10, 10);
       const float nose = 0.8f + (beatStrength * 2.5f);
@@ -482,14 +797,16 @@ void runLedAnimation() {
 #endif
 
 #if ENABLE_FALLBACK_WAVES
-  // Inject a wave only if we haven't detected any beat for a while.
-  // Note: if the music tempo is slower than NO_BEAT_FALLBACK_MS (e.g. < 75 BPM),
-  // this will also inject waves between beats.
-  if ((now - lastBeatMs >= NO_BEAT_FALLBACK_MS) && (now - lastWaveTime >= NO_BEAT_FALLBACK_MS)) {
-    if (getWaves().size() < MAX_ACTIVE_WAVES) {
-      addWave((uint32_t)random(0, 65536), 0, 1.0f, 2.0f);
+  if (g_config.enableFallbackWaves) {
+    // Inject a wave only if we haven't detected any beat for a while.
+    // Note: if the music tempo is slower than fallbackMs (e.g. < 75 BPM),
+    // this will also inject waves between beats.
+    if ((now - lastBeatMs >= g_config.fallbackMs) && (now - lastWaveTime >= g_config.fallbackMs)) {
+      if (getWaves().size() < g_config.maxActiveWaves) {
+        addWave((uint32_t)random(0, 65536), 0, 1.0f, 2.0f);
+      }
+      lastWaveTime = now;
     }
-    lastWaveTime = now;
   }
 #endif
 }
@@ -522,6 +839,8 @@ void setup() {
   showStrips();
 
   resetWaves();
+  normalizeConfig();
+  applyAnimationConfig();
 
   // Simple entropy seed (works without ADC wiring).
   randomSeed((uint32_t)micros());
@@ -557,17 +876,55 @@ void loop() {
   const uint32_t now = millis();
 
   if (now - lastAudioTime >= AUDIO_INTERVAL) {
+#if PROFILE_PERF
+    const uint32_t t0 = micros();
+#endif
     processAudio();
+#if PROFILE_PERF
+    s_audioAccumUs += (uint32_t)(micros() - t0);
+    s_audioCount += 1;
+#endif
     lastAudioTime = now;
   }
 
+#if PROFILE_PERF
+  const uint32_t t1 = micros();
+#endif
   runLedAnimation();
+#if PROFILE_PERF
+  s_animAccumUs += (uint32_t)(micros() - t1);
+  s_animCount += 1;
+#endif
 
 #if ENABLE_HAIR_STRIP
   // Hair rendering will be re-enabled later.
 #endif
 
+#if PROFILE_PERF
+  const uint32_t t2 = micros();
+#endif
   showStrips();
+#if PROFILE_PERF
+  s_showAccumUs += (uint32_t)(micros() - t2);
+  s_showCount += 1;
+
+  if ((now - s_lastProfileMs) >= PROFILE_INTERVAL_MS) {
+    s_lastProfileMs = now;
+    const uint32_t audioAvg = s_audioCount ? (uint32_t)(s_audioAccumUs / s_audioCount) : 0;
+    const uint32_t animAvg = s_animCount ? (uint32_t)(s_animAccumUs / s_animCount) : 0;
+    const uint32_t showAvg = s_showCount ? (uint32_t)(s_showAccumUs / s_showCount) : 0;
+    Serial.printf("perf avg (us): audio=%lu anim=%lu show=%lu\n",
+                  (unsigned long)audioAvg,
+                  (unsigned long)animAvg,
+                  (unsigned long)showAvg);
+    s_audioAccumUs = 0;
+    s_audioCount = 0;
+    s_animAccumUs = 0;
+    s_animCount = 0;
+    s_showAccumUs = 0;
+    s_showCount = 0;
+  }
+#endif
 #if ENABLE_WEB_TELEMETRY
   pollWebServer();
 #endif

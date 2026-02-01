@@ -1,16 +1,22 @@
 #include "audio_processor.h"
 #include <Arduino.h>
 
-// Arduino-ESP32 I2S API (core 3.x)
+// I2S API (ESP32 core 3.x uses ESP_I2S.h; older cores provide I2S.h)
+#define HAS_ESP_I2S 0
+#define HAS_ARDUINO_I2S 0
 #if defined(__has_include)
 #if __has_include(<ESP_I2S.h>)
 #include <ESP_I2S.h>
+#undef HAS_ESP_I2S
 #define HAS_ESP_I2S 1
-#else
-#define HAS_ESP_I2S 0
+#elif __has_include(<I2S.h>)
+#include <I2S.h>
+#undef HAS_ARDUINO_I2S
+#define HAS_ARDUINO_I2S 1
 #endif
 #else
 #include <ESP_I2S.h>
+#undef HAS_ESP_I2S
 #define HAS_ESP_I2S 1
 #endif
 
@@ -59,8 +65,19 @@
 #define AUDIO_FFT_SAMPLES 512
 #endif
 
-static constexpr uint32_t kSampleRateHz = AUDIO_SAMPLE_RATE_HZ; // SPH0645 datasheet is 32k..64k (BCLK = 64*Fs)
+#if AUDIO_SAMPLE_RATE_HZ == 48000
+static constexpr uint32_t kPrimarySampleRateHz = 48000;
+static constexpr uint32_t kFallbackSampleRateHz = 32000;
+#elif AUDIO_SAMPLE_RATE_HZ == 32000
+static constexpr uint32_t kPrimarySampleRateHz = 32000;
+static constexpr uint32_t kFallbackSampleRateHz = 48000;
+#else
+static constexpr uint32_t kPrimarySampleRateHz = AUDIO_SAMPLE_RATE_HZ;
+static constexpr uint32_t kFallbackSampleRateHz = 32000;
+#endif
+
 static constexpr uint16_t kFftSamples   = AUDIO_FFT_SAMPLES;    // power of 2
+static uint32_t s_sampleRateHz = kPrimarySampleRateHz;
 
 static constexpr float kBassMinHz = 40.0f;
 static constexpr float kBassMaxHz = 180.0f;
@@ -84,7 +101,7 @@ static inline float clamp01(float x) {
   return x;
 }
 
-#if HAS_ESP_I2S
+#if HAS_ESP_I2S || HAS_ARDUINO_I2S
 // Beat event (edge triggered)
 static volatile bool  s_beatPending  = false;
 static volatile float s_beatStrength = 0.0f;
@@ -109,7 +126,9 @@ float getAverageBpm() {
   return (ms > 1.0f) ? (60000.0f / ms) : 0.0f;
 }
 
+#if HAS_ESP_I2S
 static I2SClass I2S;
+#endif
 static bool s_i2sOk = false;
 
 // Interleaved stereo (L,R) 32-bit words
@@ -117,7 +136,7 @@ static int32_t s_i2sRaw[kFftSamples * 2];
 
 static double s_vReal[kFftSamples];
 static double s_vImag[kFftSamples];
-static ArduinoFFT<double> s_fft = ArduinoFFT<double>(s_vReal, s_vImag, kFftSamples, kSampleRateHz);
+static ArduinoFFT<double> s_fft = ArduinoFFT<double>(s_vReal, s_vImag, kFftSamples, kPrimarySampleRateHz);
 
 static float s_bassEma = 0.0f;
 static float s_prevBass = 0.0f;
@@ -125,12 +144,49 @@ static uint32_t s_lastBeatMs = 0;
 static uint32_t s_lastBeatIntervalMs = 0;
 static AudioTelemetry s_audioTelemetry = {};
 
+static void resetFft() {
+  s_fft = ArduinoFFT<double>(s_vReal, s_vImag, kFftSamples, s_sampleRateHz);
+}
+
 static void initTelemetryConstants() {
-  s_audioTelemetry.sampleRateHz = kSampleRateHz;
+  s_audioTelemetry.sampleRateHz = s_sampleRateHz;
   s_audioTelemetry.fftSamples = kFftSamples;
   s_audioTelemetry.bassMinHz = kBassMinHz;
   s_audioTelemetry.bassMaxHz = kBassMaxHz;
-  s_audioTelemetry.binWidthHz = (float)kSampleRateHz / (float)kFftSamples;
+  s_audioTelemetry.binWidthHz = (float)s_sampleRateHz / (float)kFftSamples;
+}
+
+static bool beginI2S(uint32_t sampleRateHz) {
+#if HAS_ESP_I2S
+  // STD mode uses separate DIN/DOUT pins; we only need DIN for a microphone.
+  // setPins(bclk, ws, dout, din, mclk)
+  I2S.setPins(I2S_BCLK_PIN, I2S_WS_PIN, -1, I2S_DIN_PIN, I2S_MCLK_PIN);
+  return I2S.begin(I2S_MODE_STD, sampleRateHz, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
+#elif HAS_ARDUINO_I2S
+  if (!I2S.begin(I2S_PHILIPS_MODE, (int)sampleRateHz, 32)) {
+    return false;
+  }
+  I2S.setSckPin(I2S_BCLK_PIN);
+  I2S.setFsPin(I2S_WS_PIN);
+  I2S.setDataInPin(I2S_DIN_PIN);
+  return true;
+#else
+  (void)sampleRateHz;
+  return false;
+#endif
+}
+
+static size_t readI2SBytes(void* buffer, size_t bytes) {
+#if HAS_ESP_I2S
+  return I2S.readBytes((char*)buffer, bytes);
+#elif HAS_ARDUINO_I2S
+  const int got = I2S.read(buffer, bytes);
+  return (got > 0) ? (size_t)got : 0;
+#else
+  (void)buffer;
+  (void)bytes;
+  return 0;
+#endif
 }
 
 static void updateBeatIntervalAverage(uint32_t nowMs) {
@@ -162,14 +218,16 @@ static void fakeAudioPulse() {
 }
 
 void setupI2S() {
-  initTelemetryConstants();
 #if AUDIO_ENABLE_I2S
-  // STD mode uses separate DIN/DOUT pins; we only need DIN for a microphone.
-  // setPins(bclk, ws, dout, din, mclk)
-  I2S.setPins(I2S_BCLK_PIN, I2S_WS_PIN, -1, I2S_DIN_PIN, I2S_MCLK_PIN);
-
+  s_sampleRateHz = kPrimarySampleRateHz;
   // Use 32-bit stereo so BCLK = 64 * Fs (required by SPH0645).
-  s_i2sOk = I2S.begin(I2S_MODE_STD, kSampleRateHz, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
+  s_i2sOk = beginI2S(s_sampleRateHz);
+  if (!s_i2sOk && kFallbackSampleRateHz != kPrimarySampleRateHz) {
+    s_sampleRateHz = kFallbackSampleRateHz;
+    s_i2sOk = beginI2S(s_sampleRateHz);
+  }
+  resetFft();
+  initTelemetryConstants();
 
   if (!s_i2sOk) {
     // Fall back to fake pulses so the project still runs.
@@ -177,6 +235,7 @@ void setupI2S() {
   }
 #else
   s_i2sOk = false;
+  initTelemetryConstants();
 #endif
 }
 
@@ -203,7 +262,7 @@ void processAudio() {
   }
 
   const size_t wantBytes = sizeof(s_i2sRaw);
-  const size_t gotBytes = I2S.readBytes((char*)s_i2sRaw, wantBytes);
+  const size_t gotBytes = readI2SBytes(s_i2sRaw, wantBytes);
   if (gotBytes < wantBytes) {
     // Not enough data yet.
     return;
@@ -232,8 +291,8 @@ void processAudio() {
 
   // Bass energy from magnitude bins
   const uint16_t maxBin = (kFftSamples >> 1) - 1;
-  uint16_t binMin = (uint16_t)((kBassMinHz * (float)kFftSamples) / (float)kSampleRateHz);
-  uint16_t binMax = (uint16_t)((kBassMaxHz * (float)kFftSamples) / (float)kSampleRateHz);
+  uint16_t binMin = (uint16_t)((kBassMinHz * (float)kFftSamples) / (float)s_sampleRateHz);
+  uint16_t binMax = (uint16_t)((kBassMaxHz * (float)kFftSamples) / (float)s_sampleRateHz);
   if (binMin < 1) binMin = 1;
   if (binMax > maxBin) binMax = maxBin;
 
@@ -299,7 +358,7 @@ void processAudio() {
 #endif
 }
 #else
-// Fallback stubs for environments without ESP_I2S.h (e.g., older PlatformIO cores).
+// Fallback stubs for environments without I2S support.
 static float s_avgBeatIntervalMs = 500.0f;
 static AudioTelemetry s_audioTelemetry = {};
 bool consumeBeat(float* strength) {
@@ -317,11 +376,12 @@ float getAverageBpm() {
 }
 
 void setupI2S() {
-  s_audioTelemetry.sampleRateHz = kSampleRateHz;
+  s_sampleRateHz = kPrimarySampleRateHz;
+  s_audioTelemetry.sampleRateHz = s_sampleRateHz;
   s_audioTelemetry.fftSamples = kFftSamples;
   s_audioTelemetry.bassMinHz = kBassMinHz;
   s_audioTelemetry.bassMaxHz = kBassMaxHz;
-  s_audioTelemetry.binWidthHz = (float)kSampleRateHz / (float)kFftSamples;
+  s_audioTelemetry.binWidthHz = (float)s_sampleRateHz / (float)kFftSamples;
   s_audioTelemetry.i2sOk = false;
   Serial.println("ESP_I2S.h not available; audio disabled");
 }

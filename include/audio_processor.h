@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio_config.h"
 #include <cstdint>
 
 // Audio interface for SPH0645 I2S microphone + simple FFT beat detection.
