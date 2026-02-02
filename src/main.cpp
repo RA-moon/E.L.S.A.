@@ -76,6 +76,12 @@
 // Serial debug print on every beat
 #define DEBUG_BEAT_TIMING     0
 
+// Physical button (active-low to GND)
+#define BUTTON_PIN            4
+#define BUTTON_ACTIVE_LOW     1
+#define BUTTON_DEBOUNCE_MS    30
+#define BUTTON_DOUBLE_TAP_MS  350
+
 // Performance profiling (averages printed to Serial).
 #define PROFILE_PERF          0
 #define PROFILE_INTERVAL_MS   2000
@@ -101,6 +107,13 @@ static uint32_t lastAudioTime = 0;
 
 // Beat envelope state
 static uint32_t lastBeatMs = 0;
+
+// Button state
+static bool s_buttonStable = false;
+static bool s_buttonLastRead = false;
+static uint32_t s_buttonLastChangeMs = 0;
+static uint32_t s_buttonLastTapMs = 0;
+static bool s_buttonWaitingSecondTap = false;
 
 struct RuntimeConfig {
   uint8_t brightness;
@@ -173,6 +186,7 @@ static bool setupWiFi();
 static void setupWebServer();
 static void pollWebServer();
 #endif
+static void handleButton();
 
 static inline void showStrips() {
   strip1.show();
@@ -295,6 +309,43 @@ static inline float beatEnvelope(float beatPeriodMs, uint32_t nowMs) {
   e *= e;
 #endif
   return clamp01(e);
+}
+
+static void handleButton() {
+  const uint32_t now = millis();
+  const bool raw = (digitalRead(BUTTON_PIN) == (BUTTON_ACTIVE_LOW ? LOW : HIGH));
+
+  if (raw != s_buttonLastRead) {
+    s_buttonLastRead = raw;
+    s_buttonLastChangeMs = now;
+  }
+
+  if ((now - s_buttonLastChangeMs) >= BUTTON_DEBOUNCE_MS && s_buttonStable != s_buttonLastRead) {
+    s_buttonStable = s_buttonLastRead;
+    if (s_buttonStable) {
+      if (s_buttonWaitingSecondTap && (now - s_buttonLastTapMs) <= BUTTON_DOUBLE_TAP_MS) {
+        s_buttonWaitingSecondTap = false;
+        g_config.animationAuto = !g_config.animationAuto;
+        normalizeConfig();
+        applyAnimationConfig();
+      } else {
+        s_buttonWaitingSecondTap = true;
+        s_buttonLastTapMs = now;
+      }
+    }
+  }
+
+  if (s_buttonWaitingSecondTap && (now - s_buttonLastTapMs) > BUTTON_DOUBLE_TAP_MS) {
+    s_buttonWaitingSecondTap = false;
+    if (!g_config.animationAuto) {
+      const int count = getAnimationCount();
+      if (count > 0) {
+        g_config.animationIndex = (g_config.animationIndex + 1) % count;
+        normalizeConfig();
+        applyAnimationConfig();
+      }
+    }
+  }
 }
 
 #if ENABLE_WEB_TELEMETRY
@@ -997,6 +1048,8 @@ void setup() {
 #endif
   showStrips();
 
+  pinMode(BUTTON_PIN, BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT);
+
   resetWaves();
   normalizeConfig();
   applyAnimationConfig();
@@ -1046,6 +1099,8 @@ void loop() {
 #endif
     lastAudioTime = now;
   }
+
+  handleButton();
 
 #if PROFILE_PERF
   const uint32_t t1 = micros();
