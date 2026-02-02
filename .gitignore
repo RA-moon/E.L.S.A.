@@ -4,3 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 include/wifi_secrets.h
+local/
+
+AGENTS.md
+.codex/AGENTS.template.md
+*_AGENT.md
