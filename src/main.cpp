@@ -2,6 +2,8 @@
 #include <Adafruit_NeoPixel.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ArduinoOTA.h>
+#include <WiFiMulti.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +54,16 @@
 #define WIFI_CONNECT_TIMEOUT_MS 12000
 // Minimum gap between /frame responses (ms). Increase if animation stutters.
 #define FRAME_MIN_INTERVAL_MS 12
+// OTA updates over Wi-Fi (ArduinoOTA)
+#define ENABLE_OTA            1
+
+#ifndef OTA_HOSTNAME
+#define OTA_HOSTNAME          "E.L.S.A."
+#endif
+
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD          ""
+#endif
 
 #ifndef WIFI_SSID
 #define WIFI_SSID ""
@@ -866,6 +878,39 @@ static void handleFrame() {
 }
 
 static bool setupWiFi() {
+#if defined(WIFI_MULTI_ENABLED) && WIFI_MULTI_ENABLED
+  if (WIFI_NETWORK_COUNT <= 0) {
+    Serial.println("WiFi disabled (WIFI_NETWORK_COUNT is 0)");
+    return false;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFiMulti wifiMulti;
+  for (int i = 0; i < WIFI_NETWORK_COUNT; i++) {
+    if (WIFI_SSIDS[i] && strlen(WIFI_SSIDS[i]) > 0) {
+      wifiMulti.addAP(WIFI_SSIDS[i], WIFI_PASSWORDS[i]);
+    }
+  }
+
+  const uint32_t start = millis();
+  while (wifiMulti.run() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.print("WiFi connected: ");
+    Serial.print(WiFi.SSID());
+    Serial.print(" @ ");
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connection failed");
+  return false;
+#else
   if (strlen(WIFI_SSID) == 0) {
     Serial.println("WiFi disabled (WIFI_SSID is empty)");
     return false;
@@ -890,6 +935,7 @@ static bool setupWiFi() {
   Serial.println("");
   Serial.println("WiFi connection failed");
   return false;
+#endif
 }
 
 static void setupWebServer() {
@@ -1029,6 +1075,20 @@ void setup() {
   wifiConnected = setupWiFi();
   setupWebServer();
 #endif
+#if ENABLE_OTA
+  if (wifiConnected) {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    if (OTA_PASSWORD[0] != '\0') {
+      ArduinoOTA.setPassword(OTA_PASSWORD);
+    }
+    ArduinoOTA.begin();
+    Serial.print("OTA ready: ");
+    Serial.print(OTA_HOSTNAME);
+    Serial.print(".local (");
+    Serial.print(WiFi.localIP());
+    Serial.println(")");
+  }
+#endif
 
   strip1.begin();
 #if ENABLE_HAIR_STRIP
@@ -1142,6 +1202,11 @@ void loop() {
 #endif
 #if ENABLE_WEB_TELEMETRY
   pollWebServer();
+#endif
+#if ENABLE_OTA
+  if (wifiConnected) {
+    ArduinoOTA.handle();
+  }
 #endif
   delay(DELAY_MS);
   yield();
