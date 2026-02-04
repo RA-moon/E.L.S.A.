@@ -12,6 +12,12 @@ static int currentAnimation = 0;
 static int fixedAnimation = 0;
 static bool autoMode = true;
 static std::vector<std::vector<int>> activeFrames;
+static float s_lastBpm = 0.0f;
+static float s_lastSwitchBpm = 0.0f;
+
+static constexpr float kBpmSwitchThreshold = 0.05f; // 5%
+static constexpr unsigned long kBpmSwitchMinIntervalMs = 3000;
+static constexpr unsigned long kAutoSwitchIntervalMs = 10000;
 
 // Keep this list limited to animations that are present in the project.
 static FrameFunction animations[] = {
@@ -60,6 +66,10 @@ void setAnimationAutoMode(bool enabled) {
     autoMode = enabled;
 }
 
+void setAutoSwitchBpm(float bpm) {
+    s_lastBpm = bpm;
+}
+
 void setAnimationIndex(int index) {
     const int count = getAnimationCount();
     if (count <= 0) return;
@@ -83,6 +93,7 @@ void updateAnimationSwitch() {
         if (currentAnimation < 0 || currentAnimation >= count) currentAnimation = 0;
         activeFrames = animations[currentAnimation]();
         lastSwitchTime = now;
+        s_lastSwitchBpm = s_lastBpm;
         return;
     }
 
@@ -94,10 +105,23 @@ void updateAnimationSwitch() {
         return;
     }
 
-    // Switch every 10 seconds.
-    if (now - lastSwitchTime >= 10000UL) {
+    // BPM-based switching when BPM is known.
+    if (s_lastBpm > 0.0f && s_lastSwitchBpm > 0.0f) {
+        const float diff = fabsf(s_lastBpm - s_lastSwitchBpm) / s_lastSwitchBpm;
+        if (diff >= kBpmSwitchThreshold && (now - lastSwitchTime) >= kBpmSwitchMinIntervalMs) {
+            lastSwitchTime = now;
+            currentAnimation = (currentAnimation + 1) % count;
+            activeFrames = animations[currentAnimation]();
+            s_lastSwitchBpm = s_lastBpm;
+            return;
+        }
+    }
+
+    // Fallback: switch every 10 seconds if BPM isn't available.
+    if (s_lastBpm <= 0.0f && (now - lastSwitchTime) >= kAutoSwitchIntervalMs) {
         lastSwitchTime = now;
         currentAnimation = (currentAnimation + 1) % count;
         activeFrames = animations[currentAnimation]();
+        s_lastSwitchBpm = s_lastBpm;
     }
 }

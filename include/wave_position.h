@@ -21,10 +21,11 @@ struct Wave {
 void setWaveFrameCount(int frameCount);
 
 void resetWaves();
-void updateWaves();
+bool updateWaves(uint32_t nowMs);
 const std::vector<Wave>& getWaves();
 void dropOldestWave();
-void applyWaveSpacing(float mix);
+void applyWaveSpacing(float mix, float minNose, float maxNose);
+void setWaveSpeedBaseFps(float fps);
 void addWave(uint32_t hue,
              int8_t speedControl = 0,
              float nose = 1.0f,

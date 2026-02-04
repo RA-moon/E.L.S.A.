@@ -4,6 +4,7 @@
 
 const std::vector<std::vector<int>>& getCurrentAnimationFrames();
 void updateAnimationSwitch();
+void setAutoSwitchBpm(float bpm);
 int getCurrentAnimationIndex();
 const char* getCurrentAnimationName();
 int getAnimationCount();

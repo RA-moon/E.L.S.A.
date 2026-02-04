@@ -4,6 +4,8 @@
 
 static std::vector<Wave> waves;
 static int gFrameCount = 10; // default; will be updated from the active animation
+static uint32_t s_lastUpdateMs = 0;
+static float s_waveSpeedBaseFps = 60.0f;
 
 void setWaveFrameCount(int frameCount) {
   if (frameCount <= 0) return;
@@ -16,12 +18,28 @@ static float maxFrameIndex() {
 
 void resetWaves() {
   waves.clear();
+  s_lastUpdateMs = 0;
 }
 
-void updateWaves() {
+void setWaveSpeedBaseFps(float fps) {
+  if (fps < 1.0f) fps = 1.0f;
+  if (fps > 240.0f) fps = 240.0f;
+  s_waveSpeedBaseFps = fps;
+}
+
+bool updateWaves(uint32_t nowMs) {
+  if (s_lastUpdateMs == 0) {
+    s_lastUpdateMs = nowMs;
+    return false;
+  }
+  uint32_t dtMs = nowMs - s_lastUpdateMs;
+  if (dtMs == 0) return false;
+  s_lastUpdateMs = nowMs;
+
+  const float dt = (float)dtMs / 1000.0f;
   const float maxIndex = maxFrameIndex();
   for (auto& wave : waves) {
-    wave.center += wave.speed;
+    wave.center += wave.speed * dt;
 
     const float endCenter = wave.reverse ? (-wave.tailWidth - 1.0f) : (maxIndex + wave.noseWidth + 1.0f);
     const float denom = endCenter - wave.startCenter;
@@ -45,6 +63,8 @@ void updateWaves() {
     }),
     waves.end()
   );
+
+  return true;
 }
 
 const std::vector<Wave>& getWaves() {
@@ -56,10 +76,12 @@ void dropOldestWave() {
   waves.erase(waves.begin());
 }
 
-void applyWaveSpacing(float mix) {
+void applyWaveSpacing(float mix, float minNose, float maxNose) {
   if (waves.size() < 2) return;
   if (mix <= 0.0f) return;
   if (mix > 1.0f) mix = 1.0f;
+  if (minNose < 0.001f) minNose = 0.001f;
+  if (maxNose < minNose) maxNose = minNose;
 
   std::vector<int> forward;
   std::vector<int> reverse;
@@ -76,8 +98,6 @@ void applyWaveSpacing(float mix) {
     });
   };
 
-  const float kMinNose = 0.05f;
-
   if (forward.size() >= 2) {
     sortByCenter(forward);
     // Leader is the wave with the higher center (moving forward).
@@ -86,8 +106,12 @@ void applyWaveSpacing(float mix) {
       const int follower = forward[i - 1];
       const float distance = waves[leader].center - waves[follower].center;
       float targetNose = distance - waves[leader].tailWidth;
-      if (targetNose < kMinNose) targetNose = kMinNose;
-      waves[follower].noseWidth = (waves[follower].noseWidth * (1.0f - mix)) + (targetNose * mix);
+      if (targetNose < minNose) targetNose = minNose;
+      if (targetNose > maxNose) targetNose = maxNose;
+      float next = (waves[follower].noseWidth * (1.0f - mix)) + (targetNose * mix);
+      if (next < minNose) next = minNose;
+      if (next > maxNose) next = maxNose;
+      waves[follower].noseWidth = next;
     }
   }
 
@@ -99,8 +123,12 @@ void applyWaveSpacing(float mix) {
       const int follower = reverse[i];
       const float distance = waves[follower].center - waves[leader].center;
       float targetNose = distance - waves[leader].tailWidth;
-      if (targetNose < kMinNose) targetNose = kMinNose;
-      waves[follower].noseWidth = (waves[follower].noseWidth * (1.0f - mix)) + (targetNose * mix);
+      if (targetNose < minNose) targetNose = minNose;
+      if (targetNose > maxNose) targetNose = maxNose;
+      float next = (waves[follower].noseWidth * (1.0f - mix)) + (targetNose * mix);
+      if (next < minNose) next = minNose;
+      if (next > maxNose) next = maxNose;
+      waves[follower].noseWidth = next;
     }
   }
 }
@@ -123,12 +151,13 @@ void addWave(uint32_t hue,
   float speed = 0.2f + (speedControl / 25.0f);
   if (speed < 0.1f) speed = 0.1f;
   if (speed > 0.6f) speed = 0.6f;
+  const float speedPerSec = speed * s_waveSpeedBaseFps;
 
   const float maxIndex = maxFrameIndex();
 
   Wave w;
   w.center = reverse ? (maxIndex + nose) : -tail;
-  w.speed = reverse ? -speed : speed;
+  w.speed = reverse ? -speedPerSec : speedPerSec;
   w.hue = hue;
   w.baseHue = hue;
   w.hueStartOffset = hueOffsetFromDegrees(hueStartDeg);

@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "animtated_circles.h"
 #include "animtated_lines.h"
@@ -43,6 +45,13 @@
 #define AUDIO_INTERVAL    15
 #define MAX_ACTIVE_WAVES  20
 #define WAVE_SPACING_MIX  0.35f
+#define WAVE_SPACING_INTERVAL_MS 60
+#define WAVE_NOSE_MIN 0.2f
+#define WAVE_NOSE_MAX 3.0f
+#define WAVE_WIDTH_SCALE 1.5f
+
+// Run audio processing in a dedicated FreeRTOS task.
+#define AUDIO_TASK_ENABLE 1
 
 // === Test mode ===
 // Set to 1 to blink white on the first TEST_LED_COUNT LEDs (matching your Arduino IDE test).
@@ -50,7 +59,8 @@
 #define TEST_LED_COUNT    30
 
 // === Web telemetry (beat/pattern output) ===
-#define ENABLE_WEB_TELEMETRY  1
+#define ENABLE_WEB_TELEMETRY  0
+#define ENABLE_CONFIG_ENDPOINT 0
 #define WEB_SERVER_PORT       80
 #define WIFI_CONNECT_TIMEOUT_MS 12000
 // Minimum gap between /frame responses (ms). Increase if animation stutters.
@@ -142,6 +152,18 @@ static float smoothedBeatPeriodMs = 0.0f;
 static uint32_t lastBeatMs = 0;
 static float lastBeatStrength = 0.7f;
 
+#if AUDIO_TASK_ENABLE
+static TaskHandle_t s_audioTaskHandle = nullptr;
+static void audioTask(void* param) {
+  (void)param;
+  const TickType_t delayTicks = pdMS_TO_TICKS(AUDIO_INTERVAL);
+  for (;;) {
+    processAudio();
+    vTaskDelay(delayTicks);
+  }
+}
+#endif
+
 // Button state
 static bool s_buttonStable = false;
 static bool s_buttonLastRead = false;
@@ -219,7 +241,6 @@ static BeatTelemetry telemetry = {
 };
 
 static WebServer server(WEB_SERVER_PORT);
-static bool wifiConnected = false;
 static uint32_t lastFrameSendMs = 0;
 
 static void handleRoot();
@@ -231,6 +252,8 @@ static void setupWebServer();
 static void pollWebServer();
 #endif
 static void handleButton();
+
+static bool wifiConnected = false;
 
 static inline void showStrips() {
   strip1.show();
@@ -272,20 +295,22 @@ static inline void computeWaveWidths(float strength, float* outNose, float* outT
   const float nose = attack + decay;
   const float tail = sustain + release;
 
-  if (outNose) *outNose = nose;
-  if (outTail) *outTail = tail;
+  if (outNose) *outNose = nose * WAVE_WIDTH_SCALE;
+  if (outTail) *outTail = tail * WAVE_WIDTH_SCALE;
 }
 
 static inline int8_t speedControlFromPeriod(uint32_t periodMs) {
-  const float minMs = (float)g_config.avgBeatMinMs;
-  const float maxMs = (float)g_config.avgBeatMaxMs;
-  if (maxMs <= minMs) return 0;
-  float t = ((float)periodMs - minMs) / (maxMs - minMs);
+  const float bpm = (periodMs > 1.0f) ? (60000.0f / (float)periodMs) : 0.0f;
+  const float bpmMin = 74.0f;
+  const float bpmMax = 130.0f;
+  if (bpmMax <= bpmMin) return 0;
+
+  float t = (bpm - bpmMin) / (bpmMax - bpmMin);
   t = clampf(t, 0.0f, 1.0f);
 
-  const float speedMin = 0.2f;
-  const float speedMax = 0.6f;
-  const float speed = speedMax - (t * (speedMax - speedMin));
+  const float speedMin = 0.05f;
+  const float speedMax = 0.15f;
+  const float speed = speedMin + (t * (speedMax - speedMin));
   const int sc = (int)lroundf((speed - 0.2f) * 25.0f);
   return (int8_t)constrain(sc, -10, 10);
 }
@@ -863,8 +888,10 @@ static void setupWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/frame", HTTP_GET, handleFrame);
+#if ENABLE_CONFIG_ENDPOINT
   server.on("/config", HTTP_GET, handleConfig);
   server.on("/config", HTTP_POST, handleConfig);
+#endif
   server.onNotFound([]() {
     server.send(404, "text/plain", "not found");
   });
@@ -926,18 +953,18 @@ void runLedAnimation() {
   int frameBrightness = g_config.brightness + (int)lroundf((255.0f - (float)g_config.brightness) * env);
   frameBrightness = constrain(frameBrightness, 0, 255);
 
+  const float smoothedAvgMs = clampf(smoothedBeatPeriodMs,
+                                     (float)g_config.avgBeatMinMs,
+                                     (float)g_config.avgBeatMaxMs);
+  const float smoothedBpm = (smoothedAvgMs > 1.0f) ? (60000.0f / smoothedAvgMs) : 0.0f;
+  setAutoSwitchBpm(smoothedBpm);
+
   updateAnimationSwitch();
   const auto& frames = getCurrentAnimationFrames();
 
 #if ENABLE_WEB_TELEMETRY
-  const float clampedAvgMs = clampf(getAverageBeatIntervalMs(),
-                                    (float)g_config.avgBeatMinMs,
-                                    (float)g_config.avgBeatMaxMs);
-  const float smoothedAvgMs = clampf(smoothedBeatPeriodMs,
-                                     (float)g_config.avgBeatMinMs,
-                                     (float)g_config.avgBeatMaxMs);
   telemetry.avgBeatIntervalMs = smoothedAvgMs;
-  telemetry.bpm = (smoothedAvgMs > 1.0f) ? (60000.0f / smoothedAvgMs) : 0.0f;
+  telemetry.bpm = smoothedBpm;
   telemetry.animationIndex = getCurrentAnimationIndex();
   telemetry.animationName = getCurrentAnimationName();
 #endif
@@ -947,8 +974,16 @@ void runLedAnimation() {
 
   strip1.clear();
 
-  updateWaves();
-  applyWaveSpacing(WAVE_SPACING_MIX);
+  static uint32_t lastSpacingMs = 0;
+  const size_t wavesBefore = getWaves().size();
+  const bool wavesMoved = updateWaves(now);
+  const size_t wavesAfterMove = getWaves().size();
+  const bool wavesRemoved = wavesAfterMove < wavesBefore;
+  const bool spacingDue = wavesRemoved || (wavesMoved && (now - lastSpacingMs) >= WAVE_SPACING_INTERVAL_MS);
+  if (spacingDue) {
+    applyWaveSpacing(WAVE_SPACING_MIX, WAVE_NOSE_MIN, WAVE_NOSE_MAX);
+    lastSpacingMs = now;
+  }
   const auto& waves = getWaves();
 
 #if ENABLE_WEB_TELEMETRY
@@ -957,27 +992,24 @@ void runLedAnimation() {
 #endif
 
   for (const auto& wave : waves) {
-    auto frame = getInterpolatedFrame(
+    renderInterpolatedFrame(
       frames,
       wave.center,
       wave.hue,
       wave.tailWidth,
       wave.noseWidth,
       frameBrightness,
-      wave.reverse
+      wave.reverse,
+      strip1,
+      NUM_LEDS1
     );
-
-    for (const auto& f : frame) {
-      if (f.ledIndex >= 0 && f.ledIndex < NUM_LEDS1) {
-        strip1.setPixelColor((uint16_t)f.ledIndex, f.color);
-      }
-    }
   }
 
 #if ENABLE_WEB_TELEMETRY
   telemetry.activeWaves = (uint32_t)getWaves().size();
 #endif
 
+  bool wavesAdded = false;
 #if ENABLE_BEAT_WAVES
   if (g_config.enableBeatWaves) {
     const float wavePeriodMs = clampf(smoothedBeatPeriodMs,
@@ -1015,8 +1047,10 @@ void runLedAnimation() {
           float nose = 1.0f;
           float tail = 1.0f;
           computeWaveWidths(strength, &nose, &tail);
+          nose = clampf(nose, WAVE_NOSE_MIN, WAVE_NOSE_MAX);
           const bool reverse = (random(0, 100) < 25);
           addWave(hue, speedCtl, nose, tail, reverse, hueStartDeg, hueEndDeg);
+          wavesAdded = true;
         }
 
         lastWaveIntervalMs = (lastWaveTime > 0) ? (now - lastWaveTime) : 0;
@@ -1060,7 +1094,9 @@ void runLedAnimation() {
         float nose = 1.0f;
         float tail = 1.0f;
         computeWaveWidths(0.0f, &nose, &tail);
+        nose = clampf(nose, WAVE_NOSE_MIN, WAVE_NOSE_MAX);
         addWave(hue, speedCtl, nose, tail, false, hueStartDeg, hueEndDeg);
+        wavesAdded = true;
       }
       lastWaveIntervalMs = (lastWaveTime > 0) ? (now - lastWaveTime) : 0;
       lastWaveTime = now;
@@ -1069,6 +1105,11 @@ void runLedAnimation() {
       telemetry.lastWaveIntervalMs = lastWaveIntervalMs;
       telemetry.activeWaves = (uint32_t)getWaves().size();
 #endif
+
+  if (wavesAdded) {
+    applyWaveSpacing(WAVE_SPACING_MIX, WAVE_NOSE_MIN, WAVE_NOSE_MAX);
+    lastSpacingMs = now;
+  }
 #if DEBUG_WAVE_TIMING
       Serial.printf("Wave(fallback): interval=%lums fallback=%lums active=%u\n",
                     (unsigned long)lastWaveIntervalMs,
@@ -1124,6 +1165,7 @@ void setup() {
   pinMode(BUTTON_PIN, BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT);
 
   resetWaves();
+  setWaveSpeedBaseFps(1000.0f / (float)DELAY_MS);
   normalizeConfig();
   applyAnimationConfig();
   applyBeatConfig();
@@ -1135,6 +1177,12 @@ void setup() {
 
   lastWaveTime = millis();
   lastAudioTime = millis();
+
+#if AUDIO_TASK_ENABLE
+  if (xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 1, &s_audioTaskHandle, 0) != pdPASS) {
+    Serial.println("Audio task create failed");
+  }
+#endif
 }
 
 void loop() {
@@ -1161,6 +1209,7 @@ void loop() {
 #endif
   const uint32_t now = millis();
 
+#if !AUDIO_TASK_ENABLE
   if (now - lastAudioTime >= AUDIO_INTERVAL) {
 #if PROFILE_PERF
     const uint32_t t0 = micros();
@@ -1172,6 +1221,7 @@ void loop() {
 #endif
     lastAudioTime = now;
   }
+#endif
 
   handleButton();
 

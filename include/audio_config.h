@@ -7,6 +7,6 @@
 #define AUDIO_SAMPLE_RATE_HZ 32000
 #endif
 #ifndef AUDIO_FFT_SAMPLES
-#define AUDIO_FFT_SAMPLES 512
+#define AUDIO_FFT_SAMPLES 256
 #endif
 #endif

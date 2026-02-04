@@ -30,6 +30,11 @@
 #define BASS_ENVELOPE_ENABLE 1
 #endif
 
+// Disable time-domain envelope (keep FFT-driven envelope only).
+#ifndef BASS_ENVELOPE_TIME_DOMAIN
+#define BASS_ENVELOPE_TIME_DOMAIN 0
+#endif
+
 #if BASS_ENVELOPE_ENABLE
 #include "bass_envelope.h"
 #endif
@@ -368,7 +373,7 @@ void processAudio() {
   }
   s_i2sBytesFilled = 0;
 
-#if BASS_ENVELOPE_ENABLE
+#if BASS_ENVELOPE_ENABLE && BASS_ENVELOPE_TIME_DOMAIN
   {
     static int32_t mono[kFftSamples] = {};
     for (uint16_t i = 0; i < kFftSamples; i++) {

@@ -17,3 +17,15 @@ std::vector<FrameResult> getInterpolatedFrame(
   int brightness,
   bool reverse
 );
+
+void renderInterpolatedFrame(
+  const std::vector<std::vector<int>>& frames,
+  float waveCenter,
+  uint32_t baseHue,
+  float widthBehind,
+  float widthAhead,
+  int brightness,
+  bool reverse,
+  Adafruit_NeoPixel& strip,
+  int ledCount
+);
