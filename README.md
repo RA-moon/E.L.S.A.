@@ -59,6 +59,8 @@ Shared defaults live in `include/audio_config.h`:
 #define AUDIO_FFT_SAMPLES 256
 ```
 The firmware will try the primary sample rate and fall back if init fails.
+Note: On ESP32-S3, `audio_config.h` sets the defaults above; on other targets,
+`src/audio_processor.cpp` defaults to `AUDIO_FFT_SAMPLES=512` unless overridden.
 
 ## Notes
 - `strip.show()` (NeoPixel) is the largest CPU cost.
@@ -85,7 +87,7 @@ All formulas and constants below reflect the current code.
 
 1) **I2S read + channel select**  
 Samples are read as interleaved 32-bit stereo. The SPH0645 channel is selected
-and shifted into a signed 24‑bit range:
+and shifted into a signed 24-bit range:
 
 ```
 sample = (raw >> SPH0645_RAW_SHIFT)
@@ -204,17 +206,17 @@ smoothedBeatPeriodMs =
   + BEAT_PERIOD_EMA_ALPHA * beatPeriodMs
 ```
 
-Then the wave period is clamped to the **hard BPM window** (75–140 BPM):
+Then the wave period is clamped to the **hard BPM window** (75-140 BPM):
 
 ```
 periodMs = clamp(smoothedBeatPeriodMs, avgBeatMinMs, avgBeatMaxMs)
 ```
 
 Current defaults (hard clamped in `normalizeConfig()`):
-- `avgBeatMinMs = 430` (≈ 140 BPM max)
-- `avgBeatMaxMs = 800` (≈ 75 BPM min)
+- `avgBeatMinMs = 430` (approx 140 BPM max)
+- `avgBeatMaxMs = 800` (approx 75 BPM min)
 
-2) **Period → speed mapping**  
+2) **Period -> speed mapping**  
 Speed is derived *per wave* at spawn time using:
 
 ```
@@ -240,8 +242,8 @@ speed = clamp(speed, 0.1..0.6)
 speedPerSec = speed * waveSpeedBaseFps
 ```
 
-3) **Position update (time‑based)**  
-Wave motion is now time‑based:
+3) **Position update (time-based)**  
+Wave motion is now time-based:
 ```
 dt = (nowMs - lastUpdateMs) / 1000
 wave.center += wave.speed * dt
@@ -278,7 +280,7 @@ tail = sustain + release
 ```
 
 The `nose` is the *leading* side and `tail` is the *trailing* side of the wave
-in animation‑frame space (not LED indices).
+in animation-frame space (not LED indices).
 
 At spawn time, `nose` is clamped to `[WAVE_NOSE_MIN, WAVE_NOSE_MAX]`.
 
@@ -300,19 +302,19 @@ hueStartDeg = random(-360, 361)
 hueEndDeg   = random(-360, 361)
 ```
 
-These are converted to 16‑bit hue offsets:
+These are converted to 16-bit hue offsets:
 ```
 offset = round(deg * 65535 / 360)
 ```
 
-During the wave’s lifetime:
+During the wave's lifetime:
 ```
 progress = clamp((center - startCenter) / (endCenter - startCenter), 0..1)
 offset   = lerp(hueStartOffset, hueEndOffset, progress)
 hue      = (baseHue + offset) mod 65536
 ```
 
-This allows **bidirectional hue rotation**, up to ±2 full rotations between
+This allows **bidirectional hue rotation**, up to +/-2 full rotations between
 start and end offsets.
 
 3) **Final pixel color**  
@@ -344,27 +346,26 @@ else:
   intensity = t^2 * (3 - 2*t)
 ```
 
-This gives a smooth, bell‑like falloff with different widths in front (nose)
+This gives a smooth, bell-like falloff with different widths in front (nose)
 and behind (tail).
 
 ---
 
-### Global Brightness Envelope
+### Global Brightness + Pulse Envelope
 **Where:** `src/main.cpp`
 
-The frame brightness is a **global multiplier** applied on top of the wave
-intensity (nose/tail envelope). It does **not** change hue or spatial shape.
+The base frame brightness is a **global multiplier** applied on top of the wave
+intensity (nose/tail envelope). A separate **pulse envelope** is then applied to
+every LED after rendering, right before `strip.show()`.
 
 Behavior (relative to the `brightness` setting):
-- At a beat peak: **100% of brightness**
-- Then linearly decays to **30%** over the **time between the last two beats**
-- If no valid BPM is detected, brightness stays at **70% of brightness** (no pulsing).
+- If no valid BPM is detected, base brightness stays at **70% of brightness**.
+- If BPM is valid and recent, base brightness is **100% of brightness** and the
+  pulse envelope eases down to **30%** between beats.
 
 Formulas:
 
 ```
-// Only pulse if the last beat interval is within the valid BPM window
-// and the beat is recent.
 bpmInRange =
   (lastBeatIntervalMs >= avgBeatMinMs) &&
   (lastBeatIntervalMs <= avgBeatMaxMs)
@@ -373,17 +374,23 @@ beatRecent =
   (lastBeatMs > 0) &&
   ((now - lastBeatMs) <= (avgBeatMaxMs * 2))
 
-brightnessRatio = 0.70           // default if no valid BPM detected
+baseBrightnessRatio = 0.70
+pulseRatio = 1.0
 
 if (bpmInRange && beatRecent) {
   intervalMs = (lastBeatIntervalMs > 0) ? lastBeatIntervalMs : smoothedBeatPeriodMs
   intervalMs = clamp(intervalMs, avgBeatMinMs, avgBeatMaxMs)
 
-  phase = clamp((now - lastBeatMs) / intervalMs, 0..1)
-  brightnessRatio = 1.0 - (1.0 - 0.30) * phase
+  baseBrightnessRatio = 1.0
+  e = 1.0 - ((now - lastBeatMs) / intervalMs)   // 1..0
+  if BEAT_DECAY_EASE_OUT: e = e * e
+  pulseRatio = BRIGHTNESS_MIN_RATIO + (BRIGHTNESS_MAX_RATIO - BRIGHTNESS_MIN_RATIO) * e
 }
 
-frameBrightness = g_config.brightness * brightnessRatio  // brightness sets the max
+frameBrightness = g_config.brightness * baseBrightnessRatio
+
+// After rendering:
+rgb = rgb * pulseRatio
 ```
 
 ---
@@ -411,7 +418,7 @@ if autoMode and bpm <= 0 and (now - lastSwitchTime) >= 10000:
 ### Button Control
 **Where:** `src/main.cpp`
 
-The button uses debounce + a double‑tap window:
+The button uses debounce + a double-tap window:
 
 ```
 debounce = 30ms
@@ -428,7 +435,7 @@ if window expires and auto mode is off -> advance animation index
 **Where:** `src/wave_position.cpp`
 
 Waves moving in the **same direction** are continuously spaced by adjusting
-the follower’s **nose width**:
+the follower's **nose width**:
 
 ```
 distance   = leader.center - follower.center
@@ -460,4 +467,4 @@ center < -tailWidth - 1
 
 If you want any of these parameters moved into `/config` or exposed in
 telemetry, say the word.
- - **Auto-mode BPM switching:** in auto mode, the animation switches when BPM changes by ≥5% (min interval 3s). If BPM is unavailable, it falls back to 10s switching.
+- **Auto-mode BPM switching:** in auto mode, the animation switches when BPM changes by >=5% (min interval 3s). If BPM is unavailable, it falls back to 10s switching.

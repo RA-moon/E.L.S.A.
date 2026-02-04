@@ -165,7 +165,6 @@ void addWave(uint32_t hue,
   w.startCenter = w.center;
   w.noseWidth = nose;
   w.tailWidth = tail;
-  w.totalWidth = nose + tail;
   w.reverse = reverse;
   waves.push_back(w);
 }

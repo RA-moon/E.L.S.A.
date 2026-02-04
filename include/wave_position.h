@@ -12,7 +12,6 @@ struct Wave {
   float startCenter;
   float noseWidth;
   float tailWidth;
-  float totalWidth;
   bool reverse;
 };
 

@@ -88,7 +88,7 @@
 #define WIFI_PASSWORD ""
 #endif
 
-// Beat-synced brightness envelope (ratio applied to g_config.brightness):
+// Beat-synced pulse envelope (applied after rendering):
 // - On beat: ratio = 1.0
 // - Then decays to BRIGHTNESS_MIN_RATIO over the *average* beat time
 #define BEAT_DECAY_MIN_MS   160
@@ -157,7 +157,7 @@ static uint32_t lastBeatMs = 0;
 static float lastBeatStrength = 0.7f;
 static uint32_t lastBeatIntervalMs = 0;
 
-// Global brightness envelope (0.30..1.00)
+// Global brightness pulse envelope (applied after rendering).
 #define BRIGHTNESS_MIN_RATIO 0.30f
 #define BRIGHTNESS_MAX_RATIO 1.00f
 
@@ -236,6 +236,8 @@ struct BeatTelemetry {
   uint32_t activeWaves;
   int animationIndex;
   const char* animationName;
+  float baseBrightnessRatio;
+  float pulseRatio;
 };
 
 static BeatTelemetry telemetry = {
@@ -250,7 +252,9 @@ static BeatTelemetry telemetry = {
   0,
   0,
   0,
-  "unknown"
+  "unknown",
+  0.0f,
+  1.0f
 };
 
 static WebServer server(WEB_SERVER_PORT);
@@ -303,6 +307,37 @@ static inline float clampf(float value, float lo, float hi) {
 
 static inline float lerpf(float a, float b, float t) {
   return a + (b - a) * t;
+}
+
+static inline float beatPulseRatio(float beatPeriodMs, uint32_t nowMs) {
+  if (lastBeatMs == 0 || beatPeriodMs <= 1.0f) return BRIGHTNESS_MAX_RATIO;
+
+  const uint32_t dt = nowMs - lastBeatMs;
+  if (dt >= (uint32_t)beatPeriodMs) return BRIGHTNESS_MIN_RATIO;
+
+  float e = 1.0f - ((float)dt / beatPeriodMs); // 1..0
+#if BEAT_DECAY_EASE_OUT
+  e *= e;
+#endif
+  const float ratio = BRIGHTNESS_MIN_RATIO + ((BRIGHTNESS_MAX_RATIO - BRIGHTNESS_MIN_RATIO) * e);
+  return clampf(ratio, BRIGHTNESS_MIN_RATIO, BRIGHTNESS_MAX_RATIO);
+}
+
+static inline void applyPulseToStrip(Adafruit_NeoPixel& strip, uint16_t count, float ratio) {
+  if (ratio >= 0.999f) return;
+  uint8_t* pixels = strip.getPixels();
+  if (!pixels) return;
+  const uint32_t totalBytes = (uint32_t)count * 3u;
+  if (ratio <= 0.0f) {
+    for (uint32_t i = 0; i < totalBytes; i++) pixels[i] = 0;
+    return;
+  }
+  uint16_t scale = (uint16_t)lroundf(ratio * 255.0f);
+  if (scale > 255) scale = 255;
+  for (uint32_t i = 0; i < totalBytes; i++) {
+    const uint16_t v = (uint16_t)pixels[i] * scale;
+    pixels[i] = (uint8_t)((v + 127) / 255);
+  }
 }
 
 static inline void computeWaveWidths(float strength, float* outNose, float* outTail) {
@@ -656,11 +691,11 @@ static bool updateConfigFromRequest() {
     changed = true;
   }
   if (server.hasArg("avgBeatMinMs") && parseLongArg(server.arg("avgBeatMinMs"), &value)) {
-    g_config.avgBeatMinMs = clampU16(value, 100, 1200);
+    g_config.avgBeatMinMs = clampU16(value, 430, 800);
     changed = true;
   }
   if (server.hasArg("avgBeatMaxMs") && parseLongArg(server.arg("avgBeatMaxMs"), &value)) {
-    g_config.avgBeatMaxMs = clampU16(value, 500, 5000);
+    g_config.avgBeatMaxMs = clampU16(value, 430, 800);
     changed = true;
   }
   if (server.hasArg("mode")) {
@@ -741,7 +776,7 @@ static void handleStatus() {
   AudioTelemetry audio = {};
   getAudioTelemetry(&audio);
 
-  char json[900];
+  char json[1024];
   const int n = snprintf(
     json,
     sizeof(json),
@@ -751,6 +786,7 @@ static void handleStatus() {
     "\"lastWaveMs\":%lu,\"lastWaveAgeMs\":%lu,\"lastWaveIntervalMs\":%lu,"
     "\"wavePeriodMs\":%lu,\"nextWaveInMs\":%lu,\"activeWaves\":%lu,"
     "\"animation\":{\"index\":%d,\"name\":\"%s\"},"
+    "\"brightness\":{\"value\":%u,\"baseRatio\":%.3f,\"pulseRatio\":%.3f},"
     "\"audio\":{\"i2sOk\":%u,\"bass\":%.2f,\"bassEma\":%.2f,\"ratio\":%.2f,"
     "\"rise\":%.2f,\"threshold\":%.2f,\"riseThreshold\":%.2f,"
     "\"micRms\":%.2f,\"micPeak\":%.2f,"
@@ -774,6 +810,9 @@ static void handleStatus() {
     (unsigned long)telemetry.activeWaves,
     telemetry.animationIndex,
     telemetry.animationName ? telemetry.animationName : "unknown",
+    (unsigned)g_config.brightness,
+    telemetry.baseBrightnessRatio,
+    telemetry.pulseRatio,
     (unsigned)(audio.i2sOk ? 1 : 0),
     audio.bass,
     audio.bassEma,
@@ -991,10 +1030,11 @@ void runLedAnimation() {
       (BEAT_PERIOD_EMA_ALPHA * beatPeriodMs);
   }
 
-  // Global brightness envelope (relative to g_config.brightness):
-  // - 100% of brightness setting at beat peak
-  // - linearly decays to BRIGHTNESS_MIN_RATIO over the last beat interval
-  float brightnessRatio = 0.70f;
+  // Base brightness envelope (relative to g_config.brightness):
+  // - 100% at beat peak (when BPM is valid and recent)
+  // - 70% idle if no valid BPM is detected
+  float baseBrightnessRatio = 0.70f;
+  float pulseRatio = 1.0f;
   const bool bpmInRange =
     (lastBeatIntervalMs >= g_config.avgBeatMinMs) &&
     (lastBeatIntervalMs <= g_config.avgBeatMaxMs);
@@ -1004,14 +1044,11 @@ void runLedAnimation() {
   if (bpmInRange && beatRecent) {
     float intervalMs = (lastBeatIntervalMs > 0) ? (float)lastBeatIntervalMs : smoothedBeatPeriodMs;
     intervalMs = clampf(intervalMs, (float)g_config.avgBeatMinMs, (float)g_config.avgBeatMaxMs);
-    const float dt = (float)(now - lastBeatMs);
-    if (intervalMs > 1.0f) {
-      const float phase = clampf(dt / intervalMs, 0.0f, 1.0f);
-      brightnessRatio = BRIGHTNESS_MAX_RATIO - ((BRIGHTNESS_MAX_RATIO - BRIGHTNESS_MIN_RATIO) * phase);
-    }
+    baseBrightnessRatio = 1.0f;
+    pulseRatio = beatPulseRatio(intervalMs, now);
   }
 
-  int frameBrightness = (int)lroundf((float)g_config.brightness * brightnessRatio);
+  int frameBrightness = (int)lroundf((float)g_config.brightness * baseBrightnessRatio);
   frameBrightness = constrain(frameBrightness, 0, 255);
 
   const float smoothedAvgMs = clampf(smoothedBeatPeriodMs,
@@ -1028,6 +1065,8 @@ void runLedAnimation() {
   telemetry.bpm = smoothedBpm;
   telemetry.animationIndex = getCurrentAnimationIndex();
   telemetry.animationName = getCurrentAnimationName();
+  telemetry.baseBrightnessRatio = baseBrightnessRatio;
+  telemetry.pulseRatio = pulseRatio;
 #endif
 
   // Tell the wave engine how many frames the current animation has.
@@ -1180,6 +1219,13 @@ void runLedAnimation() {
     }
   }
 #endif
+
+  if (pulseRatio < 0.999f) {
+    applyPulseToStrip(strip1, NUM_LEDS1, pulseRatio);
+#if ENABLE_HAIR_STRIP
+    applyPulseToStrip(strip2, NUM_LEDS2, pulseRatio);
+#endif
+  }
 }
 
 void setup() {
@@ -1213,7 +1259,7 @@ void setup() {
 #endif
 
   // Keep NeoPixel's internal brightness scaler at full.
-  // Beat pulsing is handled by the per-frame brightness parameter.
+  // Beat pulsing is handled in the frame renderer.
   strip1.setBrightness(255);
 #if ENABLE_HAIR_STRIP
   strip2.setBrightness(255);
