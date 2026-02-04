@@ -231,6 +231,45 @@ and behind (tail).
 
 ---
 
+### Global Brightness Envelope
+**Where:** `src/main.cpp`
+
+The frame brightness is a **global multiplier** applied on top of the wave
+intensity (nose/tail envelope). It does **not** change hue or spatial shape.
+
+Behavior:
+- At a beat peak: **100%**
+- Then linearly decays to **60%** over the **time between the last two beats**
+- If no valid BPM is detected, brightness stays at **70%** (no pulsing).
+
+Formulas:
+
+```
+// Only pulse if the last beat interval is within the valid BPM window
+// and the beat is recent.
+bpmInRange =
+  (lastBeatIntervalMs >= avgBeatMinMs) &&
+  (lastBeatIntervalMs <= avgBeatMaxMs)
+
+beatRecent =
+  (lastBeatMs > 0) &&
+  ((now - lastBeatMs) <= (avgBeatMaxMs * 2))
+
+brightnessRatio = 0.70           // default if no valid BPM detected
+
+if (bpmInRange && beatRecent) {
+  intervalMs = (lastBeatIntervalMs > 0) ? lastBeatIntervalMs : smoothedBeatPeriodMs
+  intervalMs = clamp(intervalMs, avgBeatMinMs, avgBeatMaxMs)
+
+  phase = clamp((now - lastBeatMs) / intervalMs, 0..1)
+  brightnessRatio = 1.0 - (1.0 - 0.60) * phase
+}
+
+frameBrightness = g_config.brightness * brightnessRatio
+```
+
+---
+
 ### Optional: Continuous Wave Spacing
 **Where:** `src/wave_position.cpp`
 

@@ -151,6 +151,11 @@ static float smoothedBeatPeriodMs = 0.0f;
 // Beat envelope state
 static uint32_t lastBeatMs = 0;
 static float lastBeatStrength = 0.7f;
+static uint32_t lastBeatIntervalMs = 0;
+
+// Global brightness envelope (0.60..1.00)
+#define BRIGHTNESS_MIN_RATIO 0.30f
+#define BRIGHTNESS_MAX_RATIO 1.00f
 
 #if AUDIO_TASK_ENABLE
 static TaskHandle_t s_audioTaskHandle = nullptr;
@@ -914,6 +919,9 @@ void runLedAnimation() {
   float beatStrength = 0.0f;
   const bool beatEvent = consumeBeat(&beatStrength);
   if (beatEvent) {
+    if (lastBeatMs > 0) {
+      lastBeatIntervalMs = now - lastBeatMs;
+    }
     lastBeatMs = now;
     lastBeatStrength = beatStrength;
 
@@ -947,10 +955,27 @@ void runLedAnimation() {
       (BEAT_PERIOD_EMA_ALPHA * beatPeriodMs);
   }
 
-  const float env = beatEnvelope(beatPeriodMs, now);
+  // Global brightness envelope:
+  // - 100% at beat peak
+  // - linearly decays to 60% over the last beat interval
+  float brightnessRatio = 0.70f;
+  const bool bpmInRange =
+    (lastBeatIntervalMs >= g_config.avgBeatMinMs) &&
+    (lastBeatIntervalMs <= g_config.avgBeatMaxMs);
+  const bool beatRecent =
+    (lastBeatMs > 0) &&
+    ((now - lastBeatMs) <= (uint32_t)(g_config.avgBeatMaxMs * 2));
+  if (bpmInRange && beatRecent) {
+    float intervalMs = (lastBeatIntervalMs > 0) ? (float)lastBeatIntervalMs : smoothedBeatPeriodMs;
+    intervalMs = clampf(intervalMs, (float)g_config.avgBeatMinMs, (float)g_config.avgBeatMaxMs);
+    const float dt = (float)(now - lastBeatMs);
+    if (intervalMs > 1.0f) {
+      const float phase = clampf(dt / intervalMs, 0.0f, 1.0f);
+      brightnessRatio = BRIGHTNESS_MAX_RATIO - ((BRIGHTNESS_MAX_RATIO - BRIGHTNESS_MIN_RATIO) * phase);
+    }
+  }
 
-  // Brightness for this frame: 255 on beat -> baseline at the end of the beat period.
-  int frameBrightness = g_config.brightness + (int)lroundf((255.0f - (float)g_config.brightness) * env);
+  int frameBrightness = (int)lroundf((float)g_config.brightness * brightnessRatio);
   frameBrightness = constrain(frameBrightness, 0, 255);
 
   const float smoothedAvgMs = clampf(smoothedBeatPeriodMs,
