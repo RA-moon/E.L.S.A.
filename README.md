@@ -16,6 +16,8 @@ ESP32-S3 project for driving addressable LEDs with audio-reactive animations and
   - LRCLK/WS: GPIO6
   - DOUT (mic) -> DIN: GPIO7
   - SEL -> GND (left channel)
+  - Pins default to `I2S_BCLK_PIN=5`, `I2S_WS_PIN=6`, `I2S_DIN_PIN=7` in `src/audio_processor.cpp`.
+    To override, set `-DI2S_BCLK_PIN=...`, `-DI2S_WS_PIN=...`, `-DI2S_DIN_PIN=...` in `platformio.ini`.
 
 ## Build + Upload (PlatformIO)
 ```bash
@@ -54,7 +56,7 @@ http://<ip>/config?mode=fixed&anim=1&brightness=80&beatMin=160&beatMax=1500&fall
 Shared defaults live in `include/audio_config.h`:
 ```c
 #define AUDIO_SAMPLE_RATE_HZ 32000
-#define AUDIO_FFT_SAMPLES 512
+#define AUDIO_FFT_SAMPLES 256
 ```
 The firmware will try the primary sample rate and fall back if init fails.
 
@@ -73,11 +75,119 @@ The firmware will try the primary sample rate and fall back if init fails.
 - **`/config` disabled by default:** set `ENABLE_CONFIG_ENDPOINT 1` in `src/main.cpp` to enable it.
 - **Audio task:** audio processing runs in a dedicated FreeRTOS task (`AUDIO_TASK_ENABLE=1`).
 
-## Wave/Beat/Color Behavior (Detailed)
+## How It Works (Detailed)
 
-This section documents how the current firmware computes:
-`wave speed`, `wave width`, `color`, and the `wave envelope`.
+This section documents the full audio -> beat -> wave -> LED pipeline.
 All formulas and constants below reflect the current code.
+
+### Audio Capture + FFT
+**Where:** `src/audio_processor.cpp`
+
+1) **I2S read + channel select**  
+Samples are read as interleaved 32-bit stereo. The SPH0645 channel is selected
+and shifted into a signed 24‑bit range:
+
+```
+sample = (raw >> SPH0645_RAW_SHIFT)
+```
+
+2) **DC removal + Hann window**
+```
+mean = sum(sample) / N
+centered = sample - mean
+windowed = centered * hann[i]
+```
+
+3) **FFT bin metrics (bass + flux)**
+```
+binWidthHz = sampleRateHz / fftSamples
+binMin = floor(bassMinHz * fftSamples / sampleRateHz)
+binMax = floor(bassMaxHz * fftSamples / sampleRateHz)
+
+mag[b] = sqrt(re[b]^2 + im[b]^2)
+bass = sum_{b=binMin..binMax} mag[b]
+flux = sum_{b=binMin..binMax} max(0, mag[b] - prevMag[b])
+```
+
+### Beat Detection (Spectral Flux)
+**Where:** `src/audio_processor.cpp`
+
+The detector uses EMAs for a moving baseline and then looks for a rising flux event:
+
+```
+bassEma = (1 - energyEmaAlpha) * bassEma + energyEmaAlpha * bass
+fluxEma = (1 - fluxEmaAlpha) * fluxEma + fluxEmaAlpha * flux
+
+intervalOk = (now - lastBeatMs) >= minBeatIntervalMs
+above = flux > fluxEma * fluxThreshold
+rise = flux - prevFlux
+rising = rise > fluxEma * fluxRiseFactor
+
+beat = intervalOk && above && rising
+```
+
+Beat strength is derived from the flux ratio:
+
+```
+ratio = flux / (fluxEma + 1e-3)
+strength = clamp01((ratio - fluxThreshold) / fluxThreshold)
+```
+
+If I2S init fails, a lightweight fake beat generator is used so animations still run.
+
+### Tempo Estimate (Average Beat Interval)
+**Where:** `src/audio_processor.cpp`
+
+A rolling buffer (N=6) of recent beat intervals is median-filtered and then smoothed:
+
+```
+intervalMs = clamp(now - lastBeatMs, avgBeatMinMs, avgBeatMaxMs)
+median = median(last N intervals)
+
+avgBeatIntervalMs =
+  (1 - kBeatIntervalEmaAlpha) * avgBeatIntervalMs
+  + kBeatIntervalEmaAlpha * median
+```
+
+### Wave Scheduling
+**Where:** `src/main.cpp`
+
+The beat period is smoothed and clamped to the BPM window before scheduling waves:
+
+```
+beatPeriodMs = clamp(getAverageBeatIntervalMs(), beatDecayMinMs, beatDecayMaxMs)
+
+smoothedBeatPeriodMs =
+  (1 - BEAT_PERIOD_EMA_ALPHA) * smoothedBeatPeriodMs
+  + BEAT_PERIOD_EMA_ALPHA * beatPeriodMs
+
+periodMs = clamp(smoothedBeatPeriodMs, avgBeatMinMs, avgBeatMaxMs)
+```
+
+Waves are scheduled against a moving deadline:
+
+```
+if nextWaveDueMs == 0: nextWaveDueMs = now + periodMs
+if periodMs changed:
+  nextWaveDueMs = (lastWaveTime > 0) ? lastWaveTime + periodMs : now + periodMs
+if now >= nextWaveDueMs:
+  spawn wave
+  nextWaveDueMs += periodMs  // repeat to catch up
+```
+
+When spawning, the engine respects `maxActiveWaves` and drops the oldest wave if needed.
+
+### Fallback Waves (No Beat Waves)
+**Where:** `src/main.cpp`
+
+If beat-driven waves are disabled but fallback is enabled:
+
+```
+if !enableBeatWaves && enableFallbackWaves
+  and (now - lastBeatMs >= fallbackMs)
+  and (now - lastWaveTime >= fallbackMs):
+    spawn wave with strength = 0
+```
 
 ### Wave Speed
 **Where:** `src/main.cpp`, `src/wave_position.cpp`
@@ -112,8 +222,8 @@ t = clamp((bpm - bpmMin) / (bpmMax - bpmMin), 0..1)
 speed = speedMin + t * (speedMax - speedMin)
 bpmMin = 74
 bpmMax = 130
-speedMin = 0.1
-speedMax = 0.4
+speedMin = 0.05
+speedMax = 0.15
 ```
 
 Then it is converted to an internal control value:
@@ -127,6 +237,7 @@ And finally converted back in `addWave()`:
 ```
 speed = 0.2 + (speedControl / 25)
 speed = clamp(speed, 0.1..0.6)
+speedPerSec = speed * waveSpeedBaseFps
 ```
 
 3) **Position update (time‑based)**  
@@ -169,6 +280,8 @@ tail = sustain + release
 The `nose` is the *leading* side and `tail` is the *trailing* side of the wave
 in animation‑frame space (not LED indices).
 
+At spawn time, `nose` is clamped to `[WAVE_NOSE_MIN, WAVE_NOSE_MAX]`.
+
 ---
 
 ### Wave Color
@@ -208,6 +321,11 @@ For each affected LED:
 color = HSV(hue, 255, brightness)
 ```
 
+Reverse waves are randomly chosen at spawn time:
+```
+reverse = (random(0, 100) < 25)
+```
+
 ---
 
 ### Wave Envelope (Spatial Intensity)
@@ -237,10 +355,10 @@ and behind (tail).
 The frame brightness is a **global multiplier** applied on top of the wave
 intensity (nose/tail envelope). It does **not** change hue or spatial shape.
 
-Behavior:
-- At a beat peak: **100%**
-- Then linearly decays to **60%** over the **time between the last two beats**
-- If no valid BPM is detected, brightness stays at **70%** (no pulsing).
+Behavior (relative to the `brightness` setting):
+- At a beat peak: **100% of brightness**
+- Then linearly decays to **30%** over the **time between the last two beats**
+- If no valid BPM is detected, brightness stays at **70% of brightness** (no pulsing).
 
 Formulas:
 
@@ -262,10 +380,46 @@ if (bpmInRange && beatRecent) {
   intervalMs = clamp(intervalMs, avgBeatMinMs, avgBeatMaxMs)
 
   phase = clamp((now - lastBeatMs) / intervalMs, 0..1)
-  brightnessRatio = 1.0 - (1.0 - 0.60) * phase
+  brightnessRatio = 1.0 - (1.0 - 0.30) * phase
 }
 
-frameBrightness = g_config.brightness * brightnessRatio
+frameBrightness = g_config.brightness * brightnessRatio  // brightness sets the max
+```
+
+---
+
+### Animation Switching (Auto Mode)
+**Where:** `src/animation_manager.cpp`
+
+Auto mode switches animations based on BPM changes, with a minimum time between switches:
+
+```
+diff = abs(bpm - lastSwitchBpm) / lastSwitchBpm
+if autoMode and bpm > 0 and diff >= 0.05 and (now - lastSwitchTime) >= 3000:
+  switch to next animation
+```
+
+If BPM is unavailable, a fixed time-based fallback is used:
+
+```
+if autoMode and bpm <= 0 and (now - lastSwitchTime) >= 10000:
+  switch to next animation
+```
+
+---
+
+### Button Control
+**Where:** `src/main.cpp`
+
+The button uses debounce + a double‑tap window:
+
+```
+debounce = 30ms
+doubleTapWindow = 350ms
+
+first tap -> wait for second
+second tap within window -> toggle auto mode
+if window expires and auto mode is off -> advance animation index
 ```
 
 ---
@@ -285,7 +439,7 @@ follower.nose = (1 - mix) * follower.nose + mix * targetNose
 Spacing is applied on changes or every `WAVE_SPACING_INTERVAL_MS`.
 
 Current mix: `WAVE_SPACING_MIX = 0.35`  
-Nose limits: `WAVE_NOSE_MIN = 0.2`, `WAVE_NOSE_MAX = 2.0`
+Nose limits: `WAVE_NOSE_MIN = 0.2`, `WAVE_NOSE_MAX = 3.0`
 
 ---
 

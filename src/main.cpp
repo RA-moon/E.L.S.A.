@@ -63,6 +63,10 @@
 #define ENABLE_CONFIG_ENDPOINT 0
 #define WEB_SERVER_PORT       80
 #define WIFI_CONNECT_TIMEOUT_MS 12000
+// Optional Wi-Fi keepalive/reconnect (disabled by default).
+// Note: reconnect attempts can block, depending on the Wi-Fi stack.
+#define ENABLE_WIFI_KEEPALIVE  0
+#define WIFI_KEEPALIVE_INTERVAL_MS 10000
 // Minimum gap between /frame responses (ms). Increase if animation stutters.
 #define FRAME_MIN_INTERVAL_MS 12
 // OTA updates over Wi-Fi (ArduinoOTA)
@@ -84,9 +88,9 @@
 #define WIFI_PASSWORD ""
 #endif
 
-// Beat-synced brightness envelope:
-// - On beat: brightness = 255
-// - Then decays to BRIGHTNESS1 over the *average* beat time
+// Beat-synced brightness envelope (ratio applied to g_config.brightness):
+// - On beat: ratio = 1.0
+// - Then decays to BRIGHTNESS_MIN_RATIO over the *average* beat time
 #define BEAT_DECAY_MIN_MS   160
 #define BEAT_DECAY_MAX_MS  1500
 #define BEAT_DECAY_EASE_OUT   1   // 1 = quadratic ease-out, 0 = linear
@@ -100,7 +104,7 @@
 // Serial debug print on every beat
 #define DEBUG_BEAT_TIMING     0
 // Serial debug print on every wave
-#define DEBUG_WAVE_TIMING     1
+#define DEBUG_WAVE_TIMING     0
 
 // Physical button (active-low to GND)
 #define BUTTON_PIN            4
@@ -153,7 +157,7 @@ static uint32_t lastBeatMs = 0;
 static float lastBeatStrength = 0.7f;
 static uint32_t lastBeatIntervalMs = 0;
 
-// Global brightness envelope (0.60..1.00)
+// Global brightness envelope (0.30..1.00)
 #define BRIGHTNESS_MIN_RATIO 0.30f
 #define BRIGHTNESS_MAX_RATIO 1.00f
 
@@ -214,6 +218,10 @@ static RuntimeConfig g_config = {
   800
 };
 
+#if (ENABLE_WEB_TELEMETRY || ENABLE_OTA)
+static bool setupWiFi();
+#endif
+
 #if ENABLE_WEB_TELEMETRY
 struct BeatTelemetry {
   uint32_t beatCount;
@@ -252,13 +260,21 @@ static void handleRoot();
 static void handleStatus();
 static void handleFrame();
 static void handleConfig();
-static bool setupWiFi();
 static void setupWebServer();
 static void pollWebServer();
 #endif
 static void handleButton();
 
 static bool wifiConnected = false;
+#if (ENABLE_WEB_TELEMETRY || ENABLE_OTA)
+#if defined(WIFI_MULTI_ENABLED) && WIFI_MULTI_ENABLED
+static WiFiMulti s_wifiMulti;
+static bool s_wifiMultiConfigured = false;
+#endif
+#if ENABLE_WIFI_KEEPALIVE
+static uint32_t s_lastWifiCheckMs = 0;
+#endif
+#endif
 
 static inline void showStrips() {
   strip1.show();
@@ -410,19 +426,6 @@ static void applyBeatConfig() {
   cfg.avgBeatMinMs = g_config.avgBeatMinMs;
   cfg.avgBeatMaxMs = g_config.avgBeatMaxMs;
   setBeatDetectorConfig(&cfg);
-}
-
-static inline float beatEnvelope(float beatPeriodMs, uint32_t nowMs) {
-  if (lastBeatMs == 0) return 0.0f;
-
-  const uint32_t dt = nowMs - lastBeatMs;
-  if (dt >= (uint32_t)beatPeriodMs) return 0.0f;
-
-  float e = 1.0f - ((float)dt / beatPeriodMs); // 1..0
-#if BEAT_DECAY_EASE_OUT
-  e *= e;
-#endif
-  return clamp01(e);
 }
 
 static void handleButton() {
@@ -827,6 +830,9 @@ static void handleFrame() {
   server.sendContent((const char*)frame, NUM_LEDS1 * 3);
 }
 
+#endif
+
+#if (ENABLE_WEB_TELEMETRY || ENABLE_OTA)
 static bool setupWiFi() {
 #if defined(WIFI_MULTI_ENABLED) && WIFI_MULTI_ENABLED
   if (WIFI_NETWORK_COUNT <= 0) {
@@ -835,15 +841,17 @@ static bool setupWiFi() {
   }
 
   WiFi.mode(WIFI_STA);
-  WiFiMulti wifiMulti;
-  for (int i = 0; i < WIFI_NETWORK_COUNT; i++) {
-    if (WIFI_SSIDS[i] && strlen(WIFI_SSIDS[i]) > 0) {
-      wifiMulti.addAP(WIFI_SSIDS[i], WIFI_PASSWORDS[i]);
+  if (!s_wifiMultiConfigured) {
+    for (int i = 0; i < WIFI_NETWORK_COUNT; i++) {
+      if (WIFI_SSIDS[i] && strlen(WIFI_SSIDS[i]) > 0) {
+        s_wifiMulti.addAP(WIFI_SSIDS[i], WIFI_PASSWORDS[i]);
+      }
     }
+    s_wifiMultiConfigured = true;
   }
 
   const uint32_t start = millis();
-  while (wifiMulti.run() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+  while (s_wifiMulti.run() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
     Serial.print(".");
   }
@@ -888,6 +896,9 @@ static bool setupWiFi() {
 #endif
 }
 
+#endif
+
+#if ENABLE_WEB_TELEMETRY
 static void setupWebServer() {
   if (!wifiConnected) return;
   server.on("/", HTTP_GET, handleRoot);
@@ -910,6 +921,31 @@ static void pollWebServer() {
   if (!wifiConnected) return;
   server.handleClient();
 }
+#endif
+
+#if (ENABLE_WEB_TELEMETRY || ENABLE_OTA)
+#if ENABLE_WIFI_KEEPALIVE
+static void pollWiFi() {
+  const uint32_t now = millis();
+  if ((now - s_lastWifiCheckMs) < WIFI_KEEPALIVE_INTERVAL_MS) return;
+  s_lastWifiCheckMs = now;
+
+#if defined(WIFI_MULTI_ENABLED) && WIFI_MULTI_ENABLED
+  if (WIFI_NETWORK_COUNT <= 0) return;
+  const wl_status_t status = s_wifiMulti.run();
+  const bool connected = (status == WL_CONNECTED);
+#else
+  if (strlen(WIFI_SSID) == 0) return;
+  WiFi.reconnect();
+  const bool connected = (WiFi.status() == WL_CONNECTED);
+#endif
+
+  if (connected && !wifiConnected) {
+    Serial.println("WiFi reconnected");
+  }
+  wifiConnected = connected;
+}
+#endif
 #endif
 
 void runLedAnimation() {
@@ -955,9 +991,9 @@ void runLedAnimation() {
       (BEAT_PERIOD_EMA_ALPHA * beatPeriodMs);
   }
 
-  // Global brightness envelope:
-  // - 100% at beat peak
-  // - linearly decays to 60% over the last beat interval
+  // Global brightness envelope (relative to g_config.brightness):
+  // - 100% of brightness setting at beat peak
+  // - linearly decays to BRIGHTNESS_MIN_RATIO over the last beat interval
   float brightnessRatio = 0.70f;
   const bool bpmInRange =
     (lastBeatIntervalMs >= g_config.avgBeatMinMs) &&
@@ -1150,8 +1186,10 @@ void setup() {
   delay(300);
   Serial.begin(115200);
 
-#if ENABLE_WEB_TELEMETRY
+#if (ENABLE_WEB_TELEMETRY || ENABLE_OTA)
   wifiConnected = setupWiFi();
+#endif
+#if ENABLE_WEB_TELEMETRY
   setupWebServer();
 #endif
 #if ENABLE_OTA
@@ -1290,6 +1328,11 @@ void loop() {
 #endif
 #if ENABLE_WEB_TELEMETRY
   pollWebServer();
+#endif
+#if (ENABLE_WEB_TELEMETRY || ENABLE_OTA)
+#if ENABLE_WIFI_KEEPALIVE
+  pollWiFi();
+#endif
 #endif
 #if ENABLE_OTA
   if (wifiConnected) {

@@ -109,9 +109,6 @@ static BeatDetectorConfig s_beatConfig = {
 // Beat interval averaging (tempo estimate)
 static constexpr float kBeatIntervalEmaAlpha = 0.15f;  // 0.05..0.25
 
-// Baseline pulse multiplier (the main loop further decays + clamps it).
-float brightnessPulse = 1.0f;
-
 static inline float clamp01(float x) {
   if (x < 0.0f) return 0.0f;
   if (x > 1.0f) return 1.0f;
@@ -284,13 +281,10 @@ static void fakeAudioPulse() {
     updateBeatIntervalAverage((uint32_t)now);
     s_lastBeatMs = (uint32_t)now;
 
-    brightnessPulse = 1.6f;
     s_beatPending = true;
     s_beatStrength = 0.7f;
     lastKickMs = now;
   }
-
-  if (brightnessPulse < 1.0f) brightnessPulse = 1.0f;
 }
 
 void setupI2S() {
@@ -502,14 +496,9 @@ void processAudio() {
     s_audioTelemetry.lastBeatMs = s_lastBeatMs;
     s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
 
-    // Also drive the global brightness pulse.
-    const float pulse = 1.0f + (0.9f * strength);
-    if (brightnessPulse < pulse) brightnessPulse = pulse;
   }
 
   s_prevFlux = flux;
-
-  if (brightnessPulse < 1.0f) brightnessPulse = 1.0f;
 #else
   fakeAudioPulse();
 #endif
