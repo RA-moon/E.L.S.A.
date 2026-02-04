@@ -42,6 +42,7 @@
 #define NO_BEAT_FALLBACK_MS 800
 #define AUDIO_INTERVAL    15
 #define MAX_ACTIVE_WAVES  20
+#define WAVE_SPACING_MIX  0.35f
 
 // === Test mode ===
 // Set to 1 to blink white on the first TEST_LED_COUNT LEDs (matching your Arduino IDE test).
@@ -79,6 +80,7 @@
 #define BEAT_DECAY_MIN_MS   160
 #define BEAT_DECAY_MAX_MS  1500
 #define BEAT_DECAY_EASE_OUT   1   // 1 = quadratic ease-out, 0 = linear
+#define BEAT_PERIOD_EMA_ALPHA 0.05f
 
 // Waves are triggered on detected beats. If no beats are detected for a while,
 // the fallback timer will still inject occasional waves so the strip doesn't go idle.
@@ -87,6 +89,8 @@
 
 // Serial debug print on every beat
 #define DEBUG_BEAT_TIMING     0
+// Serial debug print on every wave
+#define DEBUG_WAVE_TIMING     1
 
 // Physical button (active-low to GND)
 #define BUTTON_PIN            4
@@ -96,6 +100,19 @@
 
 // Performance profiling (averages printed to Serial).
 #define PROFILE_PERF          0
+
+// Wave envelope (relative units in animation frames).
+// Min values define the baseline width (sum = 1.0).
+// Max values define the peak width (sum = 4.0).
+#define WAVE_ATTACK_MIN   0.2f
+#define WAVE_SUSTAIN_MIN  0.3f
+#define WAVE_RELEASE_MIN  0.3f
+#define WAVE_DECAY_MIN    0.2f
+
+#define WAVE_ATTACK_MAX   0.8f
+#define WAVE_SUSTAIN_MAX  1.2f
+#define WAVE_RELEASE_MAX  1.2f
+#define WAVE_DECAY_MAX    0.8f
 #define PROFILE_INTERVAL_MS   2000
 
 #if PROFILE_PERF
@@ -115,10 +132,15 @@ Adafruit_NeoPixel strip2(NUM_LEDS2, DATA_PIN2, NEO_GRB + NEO_KHZ800);
 #endif
 
 static uint32_t lastWaveTime = 0;
+static uint32_t lastWaveIntervalMs = 0;
+static uint32_t lastWavePeriodMs = 0;
+static uint32_t nextWaveDueMs = 0;
 static uint32_t lastAudioTime = 0;
+static float smoothedBeatPeriodMs = 0.0f;
 
 // Beat envelope state
 static uint32_t lastBeatMs = 0;
+static float lastBeatStrength = 0.7f;
 
 // Button state
 static bool s_buttonStable = false;
@@ -160,9 +182,9 @@ static RuntimeConfig g_config = {
   0.20f,
   1.7f,
   0.12f,
-  120,
-  180,
-  2000
+  430,
+  430,
+  800
 };
 
 #if ENABLE_WEB_TELEMETRY
@@ -172,6 +194,11 @@ struct BeatTelemetry {
   float lastBeatStrength;
   float avgBeatIntervalMs;
   float bpm;
+  uint32_t lastWaveMs;
+  uint32_t lastWaveIntervalMs;
+  uint32_t wavePeriodMs;
+  uint32_t nextWaveInMs;
+  uint32_t activeWaves;
   int animationIndex;
   const char* animationName;
 };
@@ -182,6 +209,11 @@ static BeatTelemetry telemetry = {
   0.0f,
   0.0f,
   0.0f,
+  0,
+  0,
+  0,
+  0,
+  0,
   0,
   "unknown"
 };
@@ -217,6 +249,45 @@ static inline uint8_t clampU8(int value, int lo, int hi) {
   if (value < lo) return (uint8_t)lo;
   if (value > hi) return (uint8_t)hi;
   return (uint8_t)value;
+}
+
+static inline float clampf(float value, float lo, float hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+static inline float lerpf(float a, float b, float t) {
+  return a + (b - a) * t;
+}
+
+static inline void computeWaveWidths(float strength, float* outNose, float* outTail) {
+  const float t = clampf(strength, 0.0f, 1.0f);
+  const float attack = lerpf(WAVE_ATTACK_MIN, WAVE_ATTACK_MAX, t);
+  const float sustain = lerpf(WAVE_SUSTAIN_MIN, WAVE_SUSTAIN_MAX, t);
+  const float release = lerpf(WAVE_RELEASE_MIN, WAVE_RELEASE_MAX, t);
+  const float decay = lerpf(WAVE_DECAY_MIN, WAVE_DECAY_MAX, t);
+
+  // Map A/D to the leading edge and S/R to the trailing edge.
+  const float nose = attack + decay;
+  const float tail = sustain + release;
+
+  if (outNose) *outNose = nose;
+  if (outTail) *outTail = tail;
+}
+
+static inline int8_t speedControlFromPeriod(uint32_t periodMs) {
+  const float minMs = (float)g_config.avgBeatMinMs;
+  const float maxMs = (float)g_config.avgBeatMaxMs;
+  if (maxMs <= minMs) return 0;
+  float t = ((float)periodMs - minMs) / (maxMs - minMs);
+  t = clampf(t, 0.0f, 1.0f);
+
+  const float speedMin = 0.2f;
+  const float speedMax = 0.6f;
+  const float speed = speedMax - (t * (speedMax - speedMin));
+  const int sc = (int)lroundf((speed - 0.2f) * 25.0f);
+  return (int8_t)constrain(sc, -10, 10);
 }
 
 static inline uint16_t clampU16(long value, long lo, long hi) {
@@ -276,8 +347,9 @@ static void normalizeConfig() {
   if (g_config.fluxRiseFactor < 0.02f) g_config.fluxRiseFactor = 0.02f;
   if (g_config.fluxRiseFactor > 0.6f) g_config.fluxRiseFactor = 0.6f;
   g_config.minBeatIntervalMs = clampU16((long)g_config.minBeatIntervalMs, 80, 1000);
-  g_config.avgBeatMinMs = clampU16((long)g_config.avgBeatMinMs, 100, 1200);
-  g_config.avgBeatMaxMs = clampU16((long)g_config.avgBeatMaxMs, 500, 5000);
+  // Hard clamp to 75-140 BPM range (800..430 ms) regardless of config updates.
+  g_config.avgBeatMinMs = clampU16((long)g_config.avgBeatMinMs, 430, 800);
+  g_config.avgBeatMaxMs = clampU16((long)g_config.avgBeatMaxMs, 430, 800);
   if (g_config.avgBeatMinMs > g_config.avgBeatMaxMs) {
     const uint16_t tmp = g_config.avgBeatMinMs;
     g_config.avgBeatMinMs = g_config.avgBeatMaxMs;
@@ -391,96 +463,24 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     <div class="muted">Frames: <code>/frame</code> (binary, 3 bytes per LED)</div>
     <div class="row">
       <div class="muted" id="fps">frame interval: -- ms</div>
+      <div class="muted" id="wave-age">wave age: -- ms</div>
+      <div class="muted" id="wave-interval">wave interval: -- ms</div>
+      <div class="muted" id="wave-period">wave period: -- ms</div>
+      <div class="muted" id="wave-next">next wave in: -- ms</div>
+      <div class="muted" id="wave-count">active waves: --</div>
     </div>
     <canvas id="strip" width="120" height="1"></canvas>
-    <form id="config-form">
-      <div class="row">
-        <div class="col">
-          <label for="brightness">Brightness</label>
-          <input type="range" id="brightness" name="brightness" min="0" max="255" step="1" />
-        </div>
-        <div class="col">
-          <div class="small">value</div>
-          <div id="brightness-value">--</div>
-        </div>
-      </div>
-      <div class="row">
-        <label for="beat-min">Beat decay min (ms)</label>
-        <input type="number" id="beat-min" name="beatMin" min="50" max="5000" step="10" />
-        <label for="beat-max">Beat decay max (ms)</label>
-        <input type="number" id="beat-max" name="beatMax" min="50" max="10000" step="10" />
-      </div>
-      <div class="row">
-        <label for="fallback-ms">No-beat fallback (ms)</label>
-        <input type="number" id="fallback-ms" name="fallbackMs" min="0" max="10000" step="50" />
-        <label for="max-waves">Max waves</label>
-        <input type="number" id="max-waves" name="maxWaves" min="1" max="100" step="1" />
-      </div>
-    <div class="row">
-      <label for="mode">Animation mode</label>
-      <select id="mode" name="mode">
-        <option value="auto">auto</option>
-        <option value="fixed">fixed</option>
-      </select>
-      <label for="anim">Animation</label>
-      <select id="anim" name="anim"></select>
-      <button type="button" id="anim-toggle">Auto: ON</button>
-    </div>
-      <div class="row">
-        <label><input type="checkbox" id="beat-waves" /> Beat waves</label>
-        <label><input type="checkbox" id="fallback-waves" /> Fallback waves</label>
-      </div>
-      <div class="row">
-        <label for="energy-ema">Energy EMA</label>
-        <input type="number" id="energy-ema" name="energyEmaAlpha" min="0.01" max="0.50" step="0.01" />
-        <label for="flux-ema">Flux EMA</label>
-        <input type="number" id="flux-ema" name="fluxEmaAlpha" min="0.01" max="0.60" step="0.01" />
-      </div>
-      <div class="row">
-        <label for="flux-threshold">Flux threshold</label>
-        <input type="number" id="flux-threshold" name="fluxThreshold" min="1.1" max="4.0" step="0.05" />
-        <label for="flux-rise">Flux rise</label>
-        <input type="number" id="flux-rise" name="fluxRiseFactor" min="0.02" max="0.60" step="0.01" />
-      </div>
-      <div class="row">
-        <label for="min-interval">Min beat interval (ms)</label>
-        <input type="number" id="min-interval" name="minBeatIntervalMs" min="80" max="1000" step="10" />
-        <label for="avg-min">Avg beat min (ms)</label>
-        <input type="number" id="avg-min" name="avgBeatMinMs" min="100" max="1200" step="10" />
-        <label for="avg-max">Avg beat max (ms)</label>
-        <input type="number" id="avg-max" name="avgBeatMaxMs" min="500" max="5000" step="50" />
-      </div>
-      <div class="row">
-        <button type="submit">Apply</button>
-        <div class="small" id="config-status"></div>
-      </div>
-    </form>
     <pre id="payload">waiting...</pre>
     <script>
       const payloadEl = document.getElementById('payload');
       const fpsEl = document.getElementById('fps');
+      const waveAgeEl = document.getElementById('wave-age');
+      const waveIntervalEl = document.getElementById('wave-interval');
+      const wavePeriodEl = document.getElementById('wave-period');
+      const waveNextEl = document.getElementById('wave-next');
+      const waveCountEl = document.getElementById('wave-count');
       const strip = document.getElementById('strip');
       const ctx = strip.getContext('2d');
-      const configForm = document.getElementById('config-form');
-      const brightnessInput = document.getElementById('brightness');
-      const brightnessValue = document.getElementById('brightness-value');
-      const beatMinInput = document.getElementById('beat-min');
-      const beatMaxInput = document.getElementById('beat-max');
-      const fallbackInput = document.getElementById('fallback-ms');
-      const maxWavesInput = document.getElementById('max-waves');
-      const modeSelect = document.getElementById('mode');
-      const animSelect = document.getElementById('anim');
-      const animToggle = document.getElementById('anim-toggle');
-      const beatWavesInput = document.getElementById('beat-waves');
-      const fallbackWavesInput = document.getElementById('fallback-waves');
-      const energyEmaInput = document.getElementById('energy-ema');
-      const fluxEmaInput = document.getElementById('flux-ema');
-      const fluxThresholdInput = document.getElementById('flux-threshold');
-      const fluxRiseInput = document.getElementById('flux-rise');
-      const minIntervalInput = document.getElementById('min-interval');
-      const avgMinInput = document.getElementById('avg-min');
-      const avgMaxInput = document.getElementById('avg-max');
-      const configStatus = document.getElementById('config-status');
 
       let ledCount = 120;
       let frameBytes = ledCount * 3;
@@ -496,55 +496,6 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         imageData = ctx.createImageData(ledCount, 1);
       }
 
-      function updateBrightnessLabel() {
-        brightnessValue.textContent = brightnessInput.value;
-      }
-
-      function setConfigUI(data) {
-        if (!data) return;
-        brightnessInput.value = data.brightness ?? brightnessInput.value;
-        updateBrightnessLabel();
-        if (data.beatDecayMinMs !== undefined) beatMinInput.value = data.beatDecayMinMs;
-        if (data.beatDecayMaxMs !== undefined) beatMaxInput.value = data.beatDecayMaxMs;
-        if (data.fallbackMs !== undefined) fallbackInput.value = data.fallbackMs;
-        if (data.maxActiveWaves !== undefined) maxWavesInput.value = data.maxActiveWaves;
-        if (data.enableBeatWaves !== undefined) beatWavesInput.checked = !!data.enableBeatWaves;
-        if (data.enableFallbackWaves !== undefined) fallbackWavesInput.checked = !!data.enableFallbackWaves;
-
-        if (data.animation) {
-          if (data.animation.mode) modeSelect.value = data.animation.mode;
-          const list = data.animations || [];
-          animSelect.innerHTML = '';
-          list.forEach((name, idx) => {
-            const opt = document.createElement('option');
-            opt.value = idx;
-            opt.textContent = name;
-            animSelect.appendChild(opt);
-          });
-          if (data.animation.index !== undefined) animSelect.value = data.animation.index;
-          animSelect.disabled = (modeSelect.value === 'auto');
-        }
-        if (data.beat) {
-          if (data.beat.energyEmaAlpha !== undefined) energyEmaInput.value = data.beat.energyEmaAlpha;
-          if (data.beat.fluxEmaAlpha !== undefined) fluxEmaInput.value = data.beat.fluxEmaAlpha;
-          if (data.beat.fluxThreshold !== undefined) fluxThresholdInput.value = data.beat.fluxThreshold;
-          if (data.beat.fluxRiseFactor !== undefined) fluxRiseInput.value = data.beat.fluxRiseFactor;
-          if (data.beat.minBeatIntervalMs !== undefined) minIntervalInput.value = data.beat.minBeatIntervalMs;
-          if (data.beat.avgBeatMinMs !== undefined) avgMinInput.value = data.beat.avgBeatMinMs;
-          if (data.beat.avgBeatMaxMs !== undefined) avgMaxInput.value = data.beat.avgBeatMaxMs;
-        }
-        animToggle.textContent = (modeSelect.value === 'auto') ? 'Auto: ON' : 'Auto: OFF';
-      }
-
-      async function fetchConfig() {
-        try {
-          const res = await fetch('/config', { cache: 'no-store' });
-          const data = await res.json();
-          setConfigUI(data);
-        } catch (err) {
-          configStatus.textContent = 'config error';
-        }
-      }
 
       async function fetchStatus() {
         try {
@@ -555,6 +506,21 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
             ledCount = data.ledCount;
             frameBytes = data.frameBytes || (ledCount * 3);
             resizeCanvas();
+          }
+          if (data.lastWaveAgeMs !== undefined) {
+            waveAgeEl.textContent = 'wave age: ' + data.lastWaveAgeMs + ' ms';
+          }
+          if (data.lastWaveIntervalMs !== undefined) {
+            waveIntervalEl.textContent = 'wave interval: ' + data.lastWaveIntervalMs + ' ms';
+          }
+          if (data.wavePeriodMs !== undefined) {
+            wavePeriodEl.textContent = 'wave period: ' + data.wavePeriodMs + ' ms';
+          }
+          if (data.nextWaveInMs !== undefined) {
+            waveNextEl.textContent = 'next wave in: ' + data.nextWaveInMs + ' ms';
+          }
+          if (data.activeWaves !== undefined) {
+            waveCountEl.textContent = 'active waves: ' + data.activeWaves;
           }
         } catch (err) {
           payloadEl.textContent = 'error: ' + err;
@@ -595,63 +561,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         setTimeout(frameTick, Math.max(0, intervalMs - elapsed));
       }
 
-      brightnessInput.addEventListener('input', updateBrightnessLabel);
-      modeSelect.addEventListener('change', () => {
-        animSelect.disabled = (modeSelect.value === 'auto');
-        animToggle.textContent = (modeSelect.value === 'auto') ? 'Auto: ON' : 'Auto: OFF';
-      });
-
-      async function applyConfig() {
-        const params = new URLSearchParams(new FormData(configForm));
-        params.set('beatWaves', beatWavesInput.checked ? '1' : '0');
-        params.set('fallbackWaves', fallbackWavesInput.checked ? '1' : '0');
-        const url = '/config?' + params.toString();
-        configStatus.textContent = 'updating...';
-        try {
-          const res = await fetch(url, { cache: 'no-store' });
-          const data = await res.json();
-          setConfigUI(data);
-          configStatus.textContent = 'updated';
-        } catch (err) {
-          configStatus.textContent = 'update failed';
-        }
-      }
-
-      configForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        applyConfig();
-      });
-
-      let tapTimer = null;
-      let lastTap = 0;
-      animToggle.addEventListener('click', () => {
-        const now = Date.now();
-        if (now - lastTap < 350) {
-          lastTap = 0;
-          if (tapTimer) {
-            clearTimeout(tapTimer);
-            tapTimer = null;
-          }
-          modeSelect.value = (modeSelect.value === 'auto') ? 'fixed' : 'auto';
-          animSelect.disabled = (modeSelect.value === 'auto');
-          animToggle.textContent = (modeSelect.value === 'auto') ? 'Auto: ON' : 'Auto: OFF';
-          applyConfig();
-          return;
-        }
-
-        lastTap = now;
-        tapTimer = setTimeout(() => {
-          tapTimer = null;
-          if (modeSelect.value !== 'auto' && animSelect.options.length > 0) {
-            const next = (parseInt(animSelect.value || '0', 10) + 1) % animSelect.options.length;
-            animSelect.value = String(next);
-            applyConfig();
-          }
-        }, 350);
-      });
-
       fetchStatus();
-      fetchConfig();
       setInterval(fetchStatus, 1000);
       frameTick();
     </script>
@@ -792,6 +702,8 @@ static void handleStatus() {
   const uint32_t now = millis();
   const uint32_t lastBeat = telemetry.lastBeatMs;
   const uint32_t age = (lastBeat > 0) ? (now - lastBeat) : 0;
+  const uint32_t lastWave = telemetry.lastWaveMs;
+  const uint32_t waveAge = (lastWave > 0) ? (now - lastWave) : 0;
 
   AudioTelemetry audio = {};
   getAudioTelemetry(&audio);
@@ -803,6 +715,8 @@ static void handleStatus() {
     "{\"uptimeMs\":%lu,\"beatCount\":%lu,\"lastBeatMs\":%lu,\"lastBeatAgeMs\":%lu,"
     "\"ledCount\":%u,\"frameBytes\":%u,"
     "\"lastBeatStrength\":%.3f,\"avgBeatIntervalMs\":%.1f,\"bpm\":%.1f,"
+    "\"lastWaveMs\":%lu,\"lastWaveAgeMs\":%lu,\"lastWaveIntervalMs\":%lu,"
+    "\"wavePeriodMs\":%lu,\"nextWaveInMs\":%lu,\"activeWaves\":%lu,"
     "\"animation\":{\"index\":%d,\"name\":\"%s\"},"
     "\"audio\":{\"i2sOk\":%u,\"bass\":%.2f,\"bassEma\":%.2f,\"ratio\":%.2f,"
     "\"rise\":%.2f,\"threshold\":%.2f,\"riseThreshold\":%.2f,"
@@ -819,6 +733,12 @@ static void handleStatus() {
     telemetry.lastBeatStrength,
     telemetry.avgBeatIntervalMs,
     telemetry.bpm,
+    (unsigned long)lastWave,
+    (unsigned long)waveAge,
+    (unsigned long)telemetry.lastWaveIntervalMs,
+    (unsigned long)telemetry.wavePeriodMs,
+    (unsigned long)telemetry.nextWaveInMs,
+    (unsigned long)telemetry.activeWaves,
     telemetry.animationIndex,
     telemetry.animationName ? telemetry.animationName : "unknown",
     (unsigned)(audio.i2sOk ? 1 : 0),
@@ -965,26 +885,21 @@ void runLedAnimation() {
 
 #if ENABLE_BEAT_WAVES
   float beatStrength = 0.0f;
-  bool beatEvent = false;
-  if (g_config.enableBeatWaves) {
-    beatEvent = consumeBeat(&beatStrength);
-    if (beatEvent) {
-      lastBeatMs = now;
-
-      // Suppress the fallback timer right after a beat.
-      lastWaveTime = now;
+  const bool beatEvent = consumeBeat(&beatStrength);
+  if (beatEvent) {
+    lastBeatMs = now;
+    lastBeatStrength = beatStrength;
 
 #if ENABLE_WEB_TELEMETRY
-      telemetry.beatCount += 1;
-      telemetry.lastBeatMs = now;
-      telemetry.lastBeatStrength = beatStrength;
+    telemetry.beatCount += 1;
+    telemetry.lastBeatMs = now;
+    telemetry.lastBeatStrength = beatStrength;
 #endif
 
 #if DEBUG_BEAT_TIMING
-      Serial.printf("Beat: avg=%.0fms (%.1f BPM) strength=%.2f\n",
-                    getAverageBeatIntervalMs(), getAverageBpm(), beatStrength);
+    Serial.printf("Beat: avg=%.0fms (%.1f BPM) strength=%.2f\n",
+                  getAverageBeatIntervalMs(), getAverageBpm(), beatStrength);
 #endif
-    }
   }
 #else
   const bool beatEvent = false;
@@ -996,6 +911,15 @@ void runLedAnimation() {
   if (beatPeriodMs < (float)g_config.beatDecayMinMs) beatPeriodMs = (float)g_config.beatDecayMinMs;
   if (beatPeriodMs > (float)g_config.beatDecayMaxMs) beatPeriodMs = (float)g_config.beatDecayMaxMs;
 
+  // Smooth the beat period over time.
+  if (smoothedBeatPeriodMs <= 0.0f) {
+    smoothedBeatPeriodMs = beatPeriodMs;
+  } else {
+    smoothedBeatPeriodMs =
+      (1.0f - BEAT_PERIOD_EMA_ALPHA) * smoothedBeatPeriodMs +
+      (BEAT_PERIOD_EMA_ALPHA * beatPeriodMs);
+  }
+
   const float env = beatEnvelope(beatPeriodMs, now);
 
   // Brightness for this frame: 255 on beat -> baseline at the end of the beat period.
@@ -1006,8 +930,14 @@ void runLedAnimation() {
   const auto& frames = getCurrentAnimationFrames();
 
 #if ENABLE_WEB_TELEMETRY
-  telemetry.avgBeatIntervalMs = getAverageBeatIntervalMs();
-  telemetry.bpm = getAverageBpm();
+  const float clampedAvgMs = clampf(getAverageBeatIntervalMs(),
+                                    (float)g_config.avgBeatMinMs,
+                                    (float)g_config.avgBeatMaxMs);
+  const float smoothedAvgMs = clampf(smoothedBeatPeriodMs,
+                                     (float)g_config.avgBeatMinMs,
+                                     (float)g_config.avgBeatMaxMs);
+  telemetry.avgBeatIntervalMs = smoothedAvgMs;
+  telemetry.bpm = (smoothedAvgMs > 1.0f) ? (60000.0f / smoothedAvgMs) : 0.0f;
   telemetry.animationIndex = getCurrentAnimationIndex();
   telemetry.animationName = getCurrentAnimationName();
 #endif
@@ -1018,7 +948,13 @@ void runLedAnimation() {
   strip1.clear();
 
   updateWaves();
+  applyWaveSpacing(WAVE_SPACING_MIX);
   const auto& waves = getWaves();
+
+#if ENABLE_WEB_TELEMETRY
+  telemetry.wavePeriodMs = 0;
+  telemetry.nextWaveInMs = 0;
+#endif
 
   for (const auto& wave : waves) {
     auto frame = getInterpolatedFrame(
@@ -1038,30 +974,107 @@ void runLedAnimation() {
     }
   }
 
+#if ENABLE_WEB_TELEMETRY
+  telemetry.activeWaves = (uint32_t)getWaves().size();
+#endif
+
 #if ENABLE_BEAT_WAVES
-  // Beat-triggered wave injection.
-  if (beatEvent) {
-    if (getWaves().size() < g_config.maxActiveWaves) {
-      const uint32_t hue = (uint32_t)random(0, 65536);
-      const int8_t speedCtl = (int8_t)constrain((int)(beatStrength * 25.0f) - 5, -10, 10);
-      const float nose = 0.8f + (beatStrength * 2.5f);
-      const float tail = 1.5f + (beatStrength * 4.0f);
-      const bool reverse = (random(0, 100) < 25);
-      addWave(hue, speedCtl, nose, tail, reverse);
+  if (g_config.enableBeatWaves) {
+    const float wavePeriodMs = clampf(smoothedBeatPeriodMs,
+                                      (float)g_config.avgBeatMinMs,
+                                      (float)g_config.avgBeatMaxMs);
+    const uint32_t periodMs = (uint32_t)lroundf(wavePeriodMs);
+    if (periodMs > 0) {
+      if (nextWaveDueMs == 0) {
+        nextWaveDueMs = now + periodMs;
+        lastWavePeriodMs = periodMs;
+      } else if (periodMs != lastWavePeriodMs) {
+        if (lastWaveTime > 0) {
+          nextWaveDueMs = lastWaveTime + periodMs;
+        } else {
+          nextWaveDueMs = now + periodMs;
+        }
+        lastWavePeriodMs = periodMs;
+      }
+
+#if ENABLE_WEB_TELEMETRY
+      telemetry.wavePeriodMs = periodMs;
+      telemetry.nextWaveInMs = (now >= nextWaveDueMs) ? 0 : (nextWaveDueMs - now);
+#endif
+
+      if ((int32_t)(now - nextWaveDueMs) >= 0) {
+        if (getWaves().size() >= g_config.maxActiveWaves) {
+          dropOldestWave();
+        }
+        if (getWaves().size() < g_config.maxActiveWaves) {
+          const uint32_t hue = (uint32_t)random(0, 65536);
+          const int16_t hueStartDeg = (int16_t)random(-360, 361);
+          const int16_t hueEndDeg = (int16_t)random(-360, 361);
+          const float strength = clamp01(lastBeatStrength);
+          const int8_t speedCtl = speedControlFromPeriod(periodMs);
+          float nose = 1.0f;
+          float tail = 1.0f;
+          computeWaveWidths(strength, &nose, &tail);
+          const bool reverse = (random(0, 100) < 25);
+          addWave(hue, speedCtl, nose, tail, reverse, hueStartDeg, hueEndDeg);
+        }
+
+        lastWaveIntervalMs = (lastWaveTime > 0) ? (now - lastWaveTime) : 0;
+        lastWaveTime = now;
+
+#if ENABLE_WEB_TELEMETRY
+        telemetry.lastWaveMs = now;
+        telemetry.lastWaveIntervalMs = lastWaveIntervalMs;
+        telemetry.activeWaves = (uint32_t)getWaves().size();
+#endif
+
+#if DEBUG_WAVE_TIMING
+        Serial.printf("Wave: interval=%lums period=%lums active=%u\n",
+                      (unsigned long)lastWaveIntervalMs,
+                      (unsigned long)periodMs,
+                      (unsigned)getWaves().size());
+#endif
+
+        do {
+          nextWaveDueMs += periodMs;
+        } while ((int32_t)(now - nextWaveDueMs) >= 0);
+      }
     }
+  } else {
+    nextWaveDueMs = 0;
   }
 #endif
 
 #if ENABLE_FALLBACK_WAVES
-  if (g_config.enableFallbackWaves) {
+  if (!g_config.enableBeatWaves && g_config.enableFallbackWaves) {
+    nextWaveDueMs = 0;
     // Inject a wave only if we haven't detected any beat for a while.
     // Note: if the music tempo is slower than fallbackMs (e.g. < 75 BPM),
     // this will also inject waves between beats.
     if ((now - lastBeatMs >= g_config.fallbackMs) && (now - lastWaveTime >= g_config.fallbackMs)) {
       if (getWaves().size() < g_config.maxActiveWaves) {
-        addWave((uint32_t)random(0, 65536), 0, 1.0f, 2.0f);
+        const uint32_t hue = (uint32_t)random(0, 65536);
+        const int16_t hueStartDeg = (int16_t)random(-360, 361);
+        const int16_t hueEndDeg = (int16_t)random(-360, 361);
+        const int8_t speedCtl = speedControlFromPeriod(g_config.fallbackMs);
+        float nose = 1.0f;
+        float tail = 1.0f;
+        computeWaveWidths(0.0f, &nose, &tail);
+        addWave(hue, speedCtl, nose, tail, false, hueStartDeg, hueEndDeg);
       }
+      lastWaveIntervalMs = (lastWaveTime > 0) ? (now - lastWaveTime) : 0;
       lastWaveTime = now;
+#if ENABLE_WEB_TELEMETRY
+      telemetry.lastWaveMs = now;
+      telemetry.lastWaveIntervalMs = lastWaveIntervalMs;
+      telemetry.activeWaves = (uint32_t)getWaves().size();
+#endif
+#if DEBUG_WAVE_TIMING
+      Serial.printf("Wave(fallback): interval=%lums fallback=%lums active=%u\n",
+                    (unsigned long)lastWaveIntervalMs,
+                    (unsigned long)g_config.fallbackMs,
+                    (unsigned)getWaves().size());
+#endif
     }
   }
 #endif

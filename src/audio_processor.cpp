@@ -25,6 +25,14 @@
 #include "dsps_wind_hann.h"
 #include <math.h>
 
+// Optional bass envelope detector (no FFT).
+#ifndef BASS_ENVELOPE_ENABLE
+#define BASS_ENVELOPE_ENABLE 0
+#endif
+
+#if BASS_ENVELOPE_ENABLE
+#include "bass_envelope.h"
+#endif
 // === Compile-time switches ===
 #ifndef AUDIO_ENABLE_I2S
 #define AUDIO_ENABLE_I2S 1
@@ -89,9 +97,9 @@ static BeatDetectorConfig s_beatConfig = {
   0.20f,  // fluxEmaAlpha
   1.7f,   // fluxThreshold
   0.12f,  // fluxRiseFactor
-  120,    // minBeatIntervalMs
-  180,    // avgBeatMinMs
-  2000    // avgBeatMaxMs
+  430,    // minBeatIntervalMs (max ~140 BPM)
+  430,    // avgBeatMinMs
+  800     // avgBeatMaxMs (min ~75 BPM)
 };
 // Beat interval averaging (tempo estimate)
 static constexpr float kBeatIntervalEmaAlpha = 0.15f;  // 0.05..0.25
@@ -173,6 +181,10 @@ static uint8_t s_intervalCount = 0;
 static uint8_t s_intervalIndex = 0;
 static AudioTelemetry s_audioTelemetry = {};
 
+#if BASS_ENVELOPE_ENABLE
+static BassEnvelopeDetector s_bassEnv;
+#endif
+
 static void initDsp() {
   if (s_dspReady) return;
   if (dsps_fft2r_init_fc32(NULL, kFftSamples) != ESP_OK) {
@@ -227,8 +239,9 @@ static size_t readI2SBytes(void* buffer, size_t bytes) {
 
 static void updateBeatIntervalAverage(uint32_t nowMs) {
   if (s_lastBeatMs == 0) return;
-  const uint32_t intervalMs = nowMs - s_lastBeatMs;
-  if (intervalMs < s_beatConfig.avgBeatMinMs || intervalMs > s_beatConfig.avgBeatMaxMs) return;
+  uint32_t intervalMs = nowMs - s_lastBeatMs;
+  if (intervalMs < s_beatConfig.avgBeatMinMs) intervalMs = s_beatConfig.avgBeatMinMs;
+  if (intervalMs > s_beatConfig.avgBeatMaxMs) intervalMs = s_beatConfig.avgBeatMaxMs;
 
   // Keep a small rolling buffer for median-based tempo estimate.
   s_intervalBuffer[s_intervalIndex] = (uint16_t)intervalMs;
@@ -298,6 +311,14 @@ void setupI2S() {
                 s_i2sOk ? "OK" : "FAIL",
                 usedFallback ? " (fallback)" : "");
 
+#if BASS_ENVELOPE_ENABLE
+  {
+    BassEnvelopeConfig cfg = s_bassEnv.getConfig();
+    cfg.sample_rate_hz = s_sampleRateHz;
+    s_bassEnv.setConfig(cfg);
+  }
+#endif
+
   if (!s_i2sOk) {
     // Fall back to fake pulses so the project still runs.
     Serial.println("I2S init failed -> using fake audio pulse");
@@ -346,6 +367,23 @@ void processAudio() {
     return;
   }
   s_i2sBytesFilled = 0;
+
+#if BASS_ENVELOPE_ENABLE
+  {
+    static int32_t mono[kFftSamples] = {};
+    for (uint16_t i = 0; i < kFftSamples; i++) {
+      const int32_t w = s_i2sRaw[(i * 2) + (SPH0645_CHANNEL ? 1 : 0)];
+      const int32_t s = (SPH0645_RAW_SHIFT > 0) ? (w >> SPH0645_RAW_SHIFT) : w;
+      mono[i] = s;
+    }
+    BassEnvelopeEvent ev{};
+    if (s_bassEnv.processSamples(mono, kFftSamples, millis(), &ev)) {
+      Serial.printf("BassEnv: attack=%ums sustain_release=%ums\n",
+                    (unsigned)ev.attack_ms,
+                    (unsigned)ev.sustain_release_ms);
+    }
+  }
+#endif
 
   if (!s_dspReady) {
     initDsp();
