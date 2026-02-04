@@ -27,7 +27,7 @@
 
 // Optional bass envelope detector (no FFT).
 #ifndef BASS_ENVELOPE_ENABLE
-#define BASS_ENVELOPE_ENABLE 0
+#define BASS_ENVELOPE_ENABLE 1
 #endif
 
 #if BASS_ENVELOPE_ENABLE
@@ -471,6 +471,17 @@ void processAudio() {
   s_audioTelemetry.lastBeatMs = s_lastBeatMs;
   s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
   s_audioTelemetry.beatStrength = 0.0f;
+
+#if BASS_ENVELOPE_ENABLE
+  {
+    BassEnvelopeEvent ev{};
+    if (s_bassEnv.processEnvelope(bass, now, &ev)) {
+      Serial.printf("BassEnv(FFT): attack=%ums sustain_release=%ums\n",
+                    (unsigned)ev.attack_ms,
+                    (unsigned)ev.sustain_release_ms);
+    }
+  }
+#endif
 
   if (intervalOk && above && rising) {
     const float strength = clamp01((ratio - s_beatConfig.fluxThreshold) / s_beatConfig.fluxThreshold);

@@ -51,6 +51,9 @@ public:
   // Returns true if an event is emitted, and fills out_event.
   bool processSamples(const int32_t* samples, size_t count, uint32_t now_ms, BassEnvelopeEvent* out_event);
 
+  // Process a single rectified envelope sample (e.g. from FFT bass energy).
+  bool processEnvelope(float rectified, uint32_t now_ms, BassEnvelopeEvent* out_event);
+
 private:
   struct Biquad {
     float b0, b1, b2, a1, a2;
@@ -71,6 +74,7 @@ private:
   Biquad bp_;
 
   uint32_t samples_until_update_ = 0;
+  uint32_t window_samples_ = 0;
   float rect_sum_ = 0.0f;
 
   float env_ = 0.0f;

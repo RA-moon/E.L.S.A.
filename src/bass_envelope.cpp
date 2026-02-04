@@ -14,8 +14,9 @@ BassEnvelopeDetector::BassEnvelopeDetector(const BassEnvelopeConfig& cfg) : cfg_
 void BassEnvelopeDetector::reset() {
   bp_ = {};
   designBandpass();
-  samples_until_update_ = (cfg_.sample_rate_hz * cfg_.update_ms) / 1000;
-  if (samples_until_update_ == 0) samples_until_update_ = 1;
+  window_samples_ = (cfg_.sample_rate_hz * cfg_.update_ms) / 1000;
+  if (window_samples_ == 0) window_samples_ = 1;
+  samples_until_update_ = window_samples_;
   rect_sum_ = 0.0f;
   env_ = 0.0f;
   baseline_ = 0.0f;
@@ -84,10 +85,8 @@ bool BassEnvelopeDetector::processSamples(const int32_t* samples,
 
     rect_sum_ += rect;
     if (--samples_until_update_ == 0) {
-      samples_until_update_ = (cfg_.sample_rate_hz * cfg_.update_ms) / 1000;
-      if (samples_until_update_ == 0) samples_until_update_ = 1;
-
-      const float rectified = rect_sum_ / (float)samples_until_update_;
+      samples_until_update_ = window_samples_;
+      const float rectified = rect_sum_ / (float)window_samples_;
       rect_sum_ = 0.0f;
 
       if (updateEnvelope(rectified, time_ms_, out_event)) {
@@ -96,6 +95,20 @@ bool BassEnvelopeDetector::processSamples(const int32_t* samples,
       time_ms_ += cfg_.update_ms;
     }
   }
+  return fired;
+}
+
+bool BassEnvelopeDetector::processEnvelope(float rectified,
+                                           uint32_t now_ms,
+                                           BassEnvelopeEvent* out_event) {
+  if (!time_init_) {
+    time_ms_ = now_ms;
+    time_init_ = true;
+  } else if (now_ms > time_ms_ + 1000) {
+    time_ms_ = now_ms;
+  }
+
+  bool fired = updateEnvelope(rectified, now_ms, out_event);
   return fired;
 }
 
