@@ -362,6 +362,8 @@ Behavior (relative to the `brightness` setting):
 - If no valid BPM is detected, base brightness stays at **70% of brightness**.
 - If BPM is valid and recent, base brightness is **100% of brightness** and the
   pulse envelope eases down to **30%** between beats.
+- `pulseLeadMs` shifts the pulse forward in time to compensate for detection latency
+  (positive values advance the pulse, negative values delay it).
 
 Formulas:
 
@@ -376,13 +378,14 @@ beatRecent =
 
 baseBrightnessRatio = 0.70
 pulseRatio = 1.0
+pulseNow = now + pulseLeadMs
 
 if (bpmInRange && beatRecent) {
   intervalMs = (lastBeatIntervalMs > 0) ? lastBeatIntervalMs : smoothedBeatPeriodMs
   intervalMs = clamp(intervalMs, avgBeatMinMs, avgBeatMaxMs)
 
   baseBrightnessRatio = 1.0
-  e = 1.0 - ((now - lastBeatMs) / intervalMs)   // 1..0
+  e = 1.0 - ((pulseNow - lastBeatMs) / intervalMs)   // 1..0
   if BEAT_DECAY_EASE_OUT: e = e * e
   pulseRatio = BRIGHTNESS_MIN_RATIO + (BRIGHTNESS_MAX_RATIO - BRIGHTNESS_MIN_RATIO) * e
 }
@@ -465,6 +468,4 @@ center < -tailWidth - 1
 
 ---
 
-If you want any of these parameters moved into `/config` or exposed in
-telemetry, say the word.
 - **Auto-mode BPM switching:** in auto mode, the animation switches when BPM changes by >=5% (min interval 3s). If BPM is unavailable, it falls back to 10s switching.

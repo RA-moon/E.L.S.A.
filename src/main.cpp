@@ -35,7 +35,7 @@
 // Optional 2nd strip ("hair").
 // You mentioned the hair data line is on GPIO2; change as needed.
 // Keep it disabled for now to free CPU time for audio/FFT.
-#define ENABLE_HAIR_STRIP  0
+#define ENABLE_HAIR_STRIP  1
 #define DATA_PIN2          2
 #define NUM_LEDS2          44
 
@@ -184,6 +184,7 @@ struct RuntimeConfig {
   uint8_t brightness;
   uint16_t beatDecayMinMs;
   uint16_t beatDecayMaxMs;
+  int16_t pulseLeadMs;
   uint16_t fallbackMs;
   uint8_t maxActiveWaves;
   bool enableBeatWaves;
@@ -203,6 +204,7 @@ static RuntimeConfig g_config = {
   BRIGHTNESS1,
   BEAT_DECAY_MIN_MS,
   BEAT_DECAY_MAX_MS,
+  0,
   NO_BEAT_FALLBACK_MS,
   MAX_ACTIVE_WAVES,
   (ENABLE_BEAT_WAVES != 0),
@@ -417,6 +419,8 @@ static void normalizeConfig() {
     g_config.beatDecayMinMs = g_config.beatDecayMaxMs;
     g_config.beatDecayMaxMs = tmp;
   }
+  if (g_config.pulseLeadMs < -250) g_config.pulseLeadMs = -250;
+  if (g_config.pulseLeadMs > 250) g_config.pulseLeadMs = 250;
   g_config.fallbackMs = clampU16((long)g_config.fallbackMs, 0, 10000);
   g_config.maxActiveWaves = clampU8((int)g_config.maxActiveWaves, 1, 100);
   if (g_config.energyEmaAlpha < 0.01f) g_config.energyEmaAlpha = 0.01f;
@@ -658,6 +662,12 @@ static bool updateConfigFromRequest() {
     g_config.beatDecayMaxMs = clampU16(value, 50, 10000);
     changed = true;
   }
+  if (server.hasArg("pulseLeadMs") && parseLongArg(server.arg("pulseLeadMs"), &value)) {
+    if (value < -250) value = -250;
+    if (value > 250) value = 250;
+    g_config.pulseLeadMs = (int16_t)value;
+    changed = true;
+  }
   if (server.hasArg("fallbackMs") && parseLongArg(server.arg("fallbackMs"), &value)) {
     g_config.fallbackMs = clampU16(value, 0, 10000);
     changed = true;
@@ -731,6 +741,7 @@ static String buildConfigJson() {
   json += "\"brightness\":" + String(g_config.brightness);
   json += ",\"beatDecayMinMs\":" + String(g_config.beatDecayMinMs);
   json += ",\"beatDecayMaxMs\":" + String(g_config.beatDecayMaxMs);
+  json += ",\"pulseLeadMs\":" + String(g_config.pulseLeadMs);
   json += ",\"fallbackMs\":" + String(g_config.fallbackMs);
   json += ",\"maxActiveWaves\":" + String(g_config.maxActiveWaves);
   json += ",\"enableBeatWaves\":" + String(g_config.enableBeatWaves ? 1 : 0);
@@ -1045,7 +1056,10 @@ void runLedAnimation() {
     float intervalMs = (lastBeatIntervalMs > 0) ? (float)lastBeatIntervalMs : smoothedBeatPeriodMs;
     intervalMs = clampf(intervalMs, (float)g_config.avgBeatMinMs, (float)g_config.avgBeatMaxMs);
     baseBrightnessRatio = 1.0f;
-    pulseRatio = beatPulseRatio(intervalMs, now);
+    int64_t pulseNow = (int64_t)now + (int64_t)g_config.pulseLeadMs;
+    if (pulseNow < 0) pulseNow = 0;
+    if (pulseNow > 0xFFFFFFFFLL) pulseNow = 0xFFFFFFFFLL;
+    pulseRatio = beatPulseRatio(intervalMs, (uint32_t)pulseNow);
   }
 
   int frameBrightness = (int)lroundf((float)g_config.brightness * baseBrightnessRatio);
