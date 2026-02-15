@@ -19,6 +19,4 @@ static const char* WIFI_PASSWORDS[] = {
   "YOUR_WIFI_PASSWORD_3",
 };
 
-// OTA credentials
-#define OTA_HOSTNAME "YOUR_DEVICE_NAME"
-#define OTA_PASSWORD "YOUR_OTA_PASSWORD"
+// OTA credentials live in include/ota_secrets.h

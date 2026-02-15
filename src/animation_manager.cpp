@@ -17,7 +17,7 @@ static float s_lastSwitchBpm = 0.0f;
 
 static constexpr float kBpmSwitchThreshold = 0.05f; // 5%
 static constexpr unsigned long kBpmSwitchMinIntervalMs = 3000;
-static constexpr unsigned long kAutoSwitchIntervalMs = 10000;
+static constexpr unsigned long kAutoSwitchIntervalMs = 30000;
 
 // Keep this list limited to animations that are present in the project.
 static FrameFunction animations[] = {
@@ -101,6 +101,8 @@ void updateAnimationSwitch() {
         if (currentAnimation != fixedAnimation) {
             currentAnimation = fixedAnimation;
             activeFrames = animations[currentAnimation]();
+            lastSwitchTime = now;
+            s_lastSwitchBpm = s_lastBpm;
         }
         return;
     }
@@ -117,8 +119,8 @@ void updateAnimationSwitch() {
         }
     }
 
-    // Fallback: switch every 10 seconds if BPM isn't available.
-    if (s_lastBpm <= 0.0f && (now - lastSwitchTime) >= kAutoSwitchIntervalMs) {
+    // Fallback: switch every 30 seconds if nothing else triggered a switch.
+    if ((now - lastSwitchTime) >= kAutoSwitchIntervalMs) {
         lastSwitchTime = now;
         currentAnimation = (currentAnimation + 1) % count;
         activeFrames = animations[currentAnimation]();

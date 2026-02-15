@@ -25,6 +25,9 @@
 #if __has_include("wifi_secrets.h")
 #include "wifi_secrets.h"
 #endif
+#if __has_include("ota_secrets.h")
+#include "ota_secrets.h"
+#endif
 #endif
 
 // === Hardware config ===
@@ -35,7 +38,7 @@
 // Optional 2nd strip ("hair").
 // You mentioned the hair data line is on GPIO2; change as needed.
 // Keep it disabled for now to free CPU time for audio/FFT.
-#define ENABLE_HAIR_STRIP  1
+#define ENABLE_HAIR_STRIP  0
 #define DATA_PIN2          2
 #define NUM_LEDS2          44
 

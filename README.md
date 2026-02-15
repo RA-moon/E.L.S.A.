@@ -61,6 +61,18 @@ Set credentials in `include/wifi_secrets.h`:
 ```
 ESP32-S3 supports **2.4 GHz only**.
 
+## OTA
+Set OTA credentials in `include/ota_secrets.h`:
+```c
+#define OTA_HOSTNAME "your-device-name"
+#define OTA_PASSWORD "your-ota-password"
+// Optional fixed IP for uploads:
+// #define OTA_IP "192.168.31.154"
+```
+When using the OTA env (`esp32-s3-super-mini-ota`), PlatformIO reads
+`OTA_PASSWORD` directly from `include/ota_secrets.h`. If `OTA_IP` is set, it
+overrides the upload target; otherwise the OTA hostname is used (`<hostname>.local`).
+
 ## Web UI
 When Wi-Fi connects, Serial prints:
 ```

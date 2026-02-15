@@ -4,6 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 include/wifi_secrets.h
+include/ota_secrets.h
 local/
 
 AGENTS.md
