@@ -7,8 +7,10 @@
 
 // Optional 2nd strip ("hair").
 // You mentioned the hair data line is on GPIO2; change as needed.
-// Keep it disabled for now to free CPU time for audio/FFT.
+// Default is off (override with -DENABLE_HAIR_STRIP=1).
+#ifndef ENABLE_HAIR_STRIP
 #define ENABLE_HAIR_STRIP  0
+#endif
 #define DATA_PIN2          2
 #define NUM_LEDS2          44
 
@@ -36,26 +38,38 @@
 #define WAVE_WIDTH_SCALE 1.5f
 
 // Run audio processing in a dedicated FreeRTOS task.
+#ifndef AUDIO_TASK_ENABLE
 #define AUDIO_TASK_ENABLE 1
+#endif
 
 // === Test mode ===
 // Set to 1 to blink white on the first TEST_LED_COUNT LEDs (matching your Arduino IDE test).
+#ifndef TEST_SOLID_COLOR
 #define TEST_SOLID_COLOR  0
+#endif
 #define TEST_LED_COUNT    30
 
 // === Web telemetry (beat/pattern output) ===
+#ifndef ENABLE_WEB_TELEMETRY
 #define ENABLE_WEB_TELEMETRY  0
+#endif
+#ifndef ENABLE_CONFIG_ENDPOINT
 #define ENABLE_CONFIG_ENDPOINT 0
+#endif
 #define WEB_SERVER_PORT       80
 #define WIFI_CONNECT_TIMEOUT_MS 12000
 // Optional Wi-Fi keepalive/reconnect (disabled by default).
 // Note: reconnect attempts can block, depending on the Wi-Fi stack.
+#ifndef ENABLE_WIFI_KEEPALIVE
 #define ENABLE_WIFI_KEEPALIVE  0
+#endif
 #define WIFI_KEEPALIVE_INTERVAL_MS 10000
 // Minimum gap between /frame responses (ms). Increase if animation stutters.
 #define FRAME_MIN_INTERVAL_MS 12
 // OTA updates over Wi-Fi (ArduinoOTA)
+#ifndef ENABLE_OTA
 #define ENABLE_OTA            1
+#endif
 
 // Beat-synced pulse envelope (applied after rendering):
 // - On beat: ratio = 1.0
@@ -66,19 +80,29 @@
 #define BEAT_PERIOD_EMA_ALPHA 0.05f
 
 // Fade beat-driven state back toward startup defaults after inactivity.
+#ifndef ENABLE_FADE_TO_STARTUP
 #define ENABLE_FADE_TO_STARTUP 1
+#endif
 #define FADE_TO_STARTUP_IDLE_MS 10000
 #define FADE_TO_STARTUP_DURATION_MS 10000
 
 // Waves are triggered on detected beats. If no beats are detected for a while,
 // the fallback timer will still inject occasional waves so the strip doesn't go idle.
+#ifndef ENABLE_BEAT_WAVES
 #define ENABLE_BEAT_WAVES     1
+#endif
+#ifndef ENABLE_FALLBACK_WAVES
 #define ENABLE_FALLBACK_WAVES 1
+#endif
 
 // Serial debug print on every beat
+#ifndef DEBUG_BEAT_TIMING
 #define DEBUG_BEAT_TIMING     0
+#endif
 // Serial debug print on every wave
+#ifndef DEBUG_WAVE_TIMING
 #define DEBUG_WAVE_TIMING     0
+#endif
 
 // Physical button (active-low to GND)
 #define BUTTON_PIN            4
@@ -87,7 +111,9 @@
 #define BUTTON_DOUBLE_TAP_MS  350
 
 // Performance profiling (averages printed to Serial).
+#ifndef PROFILE_PERF
 #define PROFILE_PERF          0
+#endif
 
 // Wave envelope (relative units in animation frames).
 // Min values define the baseline width (sum = 1.0).

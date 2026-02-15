@@ -1,5 +1,5 @@
 
-#include "animtated_circles_reversed.h"
+#include "animated_circles_reversed.h"
 
 std::vector<std::vector<int>> getAnimationFramesCirclesReversed() {
     return {

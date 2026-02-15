@@ -1,4 +1,5 @@
 //useful things to include in code
+#pragma once
 
 #ifndef TYPES_H
 #define TYPES_H

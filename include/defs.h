@@ -1,4 +1,5 @@
 /*! \file avrlibdefs.h \brief AVRlib global defines and macros. */
+#pragma once
 //*****************************************************************************
 //
 // File Name	: 'avrlibdefs.h'

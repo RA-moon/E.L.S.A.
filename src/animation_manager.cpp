@@ -1,8 +1,8 @@
 #include "animation_manager.h"
-#include "animtated_circles.h"
-#include "animtated_lines.h"
-#include "animtated_circles_reversed.h"
-#include "animtated_lines_reversed.h"
+#include "animated_circles.h"
+#include "animated_lines.h"
+#include "animated_circles_reversed.h"
+#include "animated_lines_reversed.h"
 #include <Arduino.h>
 
 using FrameFunction = std::vector<std::vector<int>>(*)();

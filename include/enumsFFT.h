@@ -1,3 +1,4 @@
+#pragma once
 #ifndef enumsFFT_h
 #define enumsFFT_h
 /* Custom constants */

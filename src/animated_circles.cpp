@@ -1,5 +1,5 @@
 
-#include "animtated_circles.h"
+#include "animated_circles.h"
 
 std::vector<std::vector<int>> getAnimationFramesCircles() {
     return {

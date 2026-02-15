@@ -53,6 +53,14 @@ pio run -e esp32-s3-super-mini -t upload
 
 If upload is flaky, hold BOOT, tap RESET, then release BOOT after "Connecting..." appears.
 
+## Formatting
+```bash
+./scripts/format.sh
+```
+
+## Architecture
+See `docs/architecture.md`.
+
 ## Wi-Fi
 Set credentials in `include/wifi_secrets.h`:
 ```c
@@ -111,9 +119,9 @@ Note: On ESP32-S3, `audio_config.h` sets the defaults above; on other targets,
 - **Wave spacing throttled:** spacing is applied only on changes or every ~`WAVE_SPACING_INTERVAL_MS` instead of every frame.
 - **FFT size reduced:** `AUDIO_FFT_SAMPLES` is now `256` for lower CPU load.
 - **Bass envelope (FFT only):** time-domain envelope is disabled by default (`BASS_ENVELOPE_TIME_DOMAIN=0`).
-- **Web telemetry off by default:** set `ENABLE_WEB_TELEMETRY 1` in `src/main.cpp` to re-enable.
-- **`/config` disabled by default:** set `ENABLE_CONFIG_ENDPOINT 1` in `src/main.cpp` to enable it.
-- **Audio task:** audio processing runs in a dedicated FreeRTOS task (`AUDIO_TASK_ENABLE=1`).
+- **Web telemetry off by default:** set `-DENABLE_WEB_TELEMETRY=1` in `platformio.ini` `build_flags` to re-enable.
+- **`/config` disabled by default:** set `-DENABLE_CONFIG_ENDPOINT=1` in `platformio.ini` `build_flags` to enable it.
+- **Audio task:** audio processing runs in a dedicated FreeRTOS task (`AUDIO_TASK_ENABLE=1` in `platformio.ini` `build_flags`).
 
 ## How It Works (Detailed)
 
@@ -190,7 +198,7 @@ avgBeatIntervalMs =
 ```
 
 ### Wave Scheduling
-**Where:** `src/main.cpp`
+**Where:** `src/animation_engine.cpp`
 
 The beat period is smoothed and clamped to the BPM window before scheduling waves:
 
@@ -218,7 +226,7 @@ if now >= nextWaveDueMs:
 When spawning, the engine respects `maxActiveWaves` and drops the oldest wave if needed.
 
 ### Fallback Waves (No Beat Waves)
-**Where:** `src/main.cpp`
+**Where:** `src/animation_engine.cpp`
 
 If beat-driven waves are disabled but fallback is enabled:
 
@@ -230,7 +238,7 @@ if !enableBeatWaves && enableFallbackWaves
 ```
 
 ### Wave Speed
-**Where:** `src/main.cpp`, `src/wave_position.cpp`
+**Where:** `src/animation_engine.cpp`, `src/wave_position.cpp`
 
 1) **Beat period used for waves**  
 The wave scheduler uses a *smoothed* beat period:
@@ -293,7 +301,7 @@ by using a base FPS of `1000 / DELAY_MS` (set in `setup()` via `setWaveSpeedBase
 ---
 
 ### Wave Width (ASRD)
-**Where:** `src/main.cpp`
+**Where:** `src/animation_engine.cpp`
 
 Wave width is built from **Attack/Sustain/Release/Decay** (ASRD) values that
 interpolate between a **minimum** width (sum=1.0) and **maximum** width (sum=4.0)
@@ -325,7 +333,7 @@ At spawn time, `nose` is clamped to `[WAVE_NOSE_MIN, WAVE_NOSE_MAX]`.
 ---
 
 ### Wave Color
-**Where:** `src/main.cpp`, `src/wave_position.cpp`, `src/frame_interpolation.cpp`
+**Where:** `src/animation_engine.cpp`, `src/wave_position.cpp`, `src/frame_interpolation.cpp`
 
 1) **Base hue per wave**  
 At spawn time:
@@ -390,7 +398,7 @@ and behind (tail).
 ---
 
 ### Global Brightness + Pulse Envelope
-**Where:** `src/main.cpp`
+**Where:** `src/animation_engine.cpp`
 
 The base frame brightness is a **global multiplier** applied on top of the wave
 intensity (nose/tail envelope). A separate **pulse envelope** is then applied to
@@ -457,7 +465,7 @@ if autoMode and bpm <= 0 and (now - lastSwitchTime) >= 10000:
 ---
 
 ### Button Control
-**Where:** `src/main.cpp`
+**Where:** `src/controls.cpp`
 
 The button uses debounce + a double-tap window:
 

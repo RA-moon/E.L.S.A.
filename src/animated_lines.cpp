@@ -1,5 +1,5 @@
-#include "animtated_lines.h"
-#include "animtated_lines_reversed.h"
+#include "animated_lines.h"
+#include "animated_lines_reversed.h"
 #include <algorithm>
 
 std::vector<std::vector<int>> getAnimationFramesLines() {

@@ -1,5 +1,5 @@
 
-#include "animtated_lines_reversed.h"
+#include "animated_lines_reversed.h"
 
 std::vector<std::vector<int>> getAnimationFramesLinesReversed() {
     return {
@@ -21,4 +21,3 @@ std::vector<std::vector<int>> getAnimationFramesLinesReversed() {
         {19, 0}
     };
 }
-
