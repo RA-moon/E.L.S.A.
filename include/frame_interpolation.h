@@ -1,7 +1,7 @@
 
 #pragma once
 #include <vector>
-#include <Adafruit_NeoPixel.h>
+#include <FastLED.h>
 
 void renderInterpolatedFrame(
   const std::vector<std::vector<int>>& frames,
@@ -11,6 +11,6 @@ void renderInterpolatedFrame(
   float widthAhead,
   int brightness,
   bool reverse,
-  Adafruit_NeoPixel& strip,
+  CRGB* leds,
   int ledCount
 );

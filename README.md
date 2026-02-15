@@ -11,6 +11,7 @@ ESP32-S3 project for driving addressable LEDs with audio-reactive animations and
 ## Hardware (current wiring)
 - Board: ESP32-S3 Super Mini (4MB Flash / 2MB PSRAM)
 - LED data: GPIO1
+- Hair LED data: GPIO2
 - I2S mic (SPH0645):
   - BCLK: GPIO5
   - LRCLK/WS: GPIO6
@@ -18,6 +19,31 @@ ESP32-S3 project for driving addressable LEDs with audio-reactive animations and
   - SEL -> GND (left channel)
   - Pins default to `I2S_BCLK_PIN=5`, `I2S_WS_PIN=6`, `I2S_DIN_PIN=7` in `src/audio_processor.cpp`.
     To override, set `-DI2S_BCLK_PIN=...`, `-DI2S_WS_PIN=...`, `-DI2S_DIN_PIN=...` in `platformio.ini`.
+- Button: GPIO4 (active-low to GND, internal pull-up enabled)
+
+## Wiring Diagram (Full)
+```
+ESP32-S3 Super Mini
+  5V   ---------------------> LED strips +5V (brain + hair)
+  3V3  ---------------------> SPH0645 VDD
+  GND  ----+---------------> LED strips GND
+           +---------------> SPH0645 GND
+           +---------------> Power supply GND (common ground)
+
+  GPIO1 --------------------> Brain strip DIN (NUM_LEDS1=120)
+  GPIO2 --------------------> Hair strip DIN (NUM_LEDS2=44)
+
+  GPIO5 --------------------> SPH0645 BCLK
+  GPIO6 --------------------> SPH0645 LRCLK/WS
+  GPIO7 --------------------> SPH0645 DOUT
+  SEL  ---------------------> GND (left channel)
+
+  GPIO4 --------------------> Button -> GND (active-low)
+```
+
+**Notes:**
+- Ensure all grounds are common between ESP32, mic, LED strips, and the LED power supply.
+- LED strips must connect to their **DIN** (input) end.
 
 ## Build + Upload (PlatformIO)
 ```bash
@@ -63,7 +89,7 @@ Note: On ESP32-S3, `audio_config.h` sets the defaults above; on other targets,
 `src/audio_processor.cpp` defaults to `AUDIO_FFT_SAMPLES=512` unless overridden.
 
 ## Notes
-- `strip.show()` (NeoPixel) is the largest CPU cost.
+- `FastLED.show()` is the largest CPU cost.
 - Close the web UI if you want to reduce CPU/network load.
 
 ## Recent Performance/Behavior Changes

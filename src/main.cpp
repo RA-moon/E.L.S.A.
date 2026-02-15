@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <Adafruit_NeoPixel.h>
+#include <FastLED.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoOTA.h>
@@ -38,6 +38,18 @@
 #define ENABLE_HAIR_STRIP  1
 #define DATA_PIN2          2
 #define NUM_LEDS2          44
+
+// Hair strip animation (independent of beat-driven brain strip).
+#define HAIR_BRIGHTNESS            255   // 0..255
+#define HAIR_SPEED_RAINBOW         10   // hue delta per update
+#define HAIR_SPEED_FADE             5   // brightness delta per update
+#define HAIR_UPDATE_MS             30
+#define HAIR_COLOR_CYCLE_DURATION_MS 1800000UL  // 30 minutes
+#define HAIR_RAINBOW_END1           32
+#define HAIR_FADE_START             33
+#define HAIR_FADE_END               39
+#define HAIR_RAINBOW_START2          40
+#define HAIR_RAINBOW_END2            43
 
 #define BRIGHTNESS1       80   // baseline (0..255)
 #define DELAY_MS          10
@@ -139,10 +151,87 @@ static uint32_t s_showCount = 0;
 static uint32_t s_lastProfileMs = 0;
 #endif
 
-Adafruit_NeoPixel strip1(NUM_LEDS1, DATA_PIN1, NEO_GRB + NEO_KHZ800);
+CRGB leds1[NUM_LEDS1];
 
 #if ENABLE_HAIR_STRIP
-Adafruit_NeoPixel strip2(NUM_LEDS2, DATA_PIN2, NEO_GRB + NEO_KHZ800);
+CRGB leds2[NUM_LEDS2];
+
+static uint8_t s_hairHueOffset = 0;
+static int s_hairFadeBrightness = 0;
+static int s_hairFadeDirection = 1;
+static uint32_t s_hairColorCycleStartMs = 0;
+static uint32_t s_lastHairUpdateMs = 0;
+
+static inline void updateHairStrip(uint32_t nowMs) {
+  if ((int32_t)(nowMs - s_lastHairUpdateMs) < (int32_t)HAIR_UPDATE_MS) return;
+  s_lastHairUpdateMs = nowMs;
+
+  fill_solid(leds2, NUM_LEDS2, CRGB::Black);
+
+  const int lastIndex = (NUM_LEDS2 > 0) ? (NUM_LEDS2 - 1) : -1;
+  const int r1Start = 0;
+  const int r1End = min((int)HAIR_RAINBOW_END1, lastIndex);
+  const int r2Start = max((int)HAIR_RAINBOW_START2, 0);
+  const int r2End = min((int)HAIR_RAINBOW_END2, lastIndex);
+
+  int activeRainbowLeds = 0;
+  if (r1End >= r1Start) activeRainbowLeds += (r1End - r1Start + 1);
+  if (r2End >= r2Start) activeRainbowLeds += (r2End - r2Start + 1);
+
+  int rainbowIndex = 0;
+  if (activeRainbowLeds > 0) {
+    for (int i = r1Start; i <= r1End; i++) {
+      const uint8_t hue = s_hairHueOffset + (uint8_t)(rainbowIndex * 255 / activeRainbowLeds);
+      leds2[i] = CHSV(hue, 255, 255);
+      rainbowIndex++;
+    }
+    for (int i = r2Start; i <= r2End; i++) {
+      const uint8_t hue = s_hairHueOffset + (uint8_t)(rainbowIndex * 255 / activeRainbowLeds);
+      leds2[i] = CHSV(hue, 255, 255);
+      rainbowIndex++;
+    }
+  }
+
+  if (s_hairColorCycleStartMs == 0) {
+    s_hairColorCycleStartMs = nowMs;
+  }
+  const uint32_t elapsed = (nowMs - s_hairColorCycleStartMs) % HAIR_COLOR_CYCLE_DURATION_MS;
+  const float phase = (float)elapsed / (HAIR_COLOR_CYCLE_DURATION_MS / 2.0f);
+  const float interpFactor = (phase <= 1.0f) ? phase : (2.0f - phase);
+
+  const int startHue = 96;
+  const int endHue = 160;
+  const uint8_t interpHue = (uint8_t)(startHue + (int)((endHue - startHue) * interpFactor));
+
+  int effectiveBrightness = s_hairFadeBrightness;
+  if (s_hairFadeBrightness > 80 && s_hairFadeBrightness < 180) {
+    effectiveBrightness += (int)random(-30, 30);
+    effectiveBrightness = constrain(effectiveBrightness, 0, 255);
+  }
+  const CRGB fadeColor = CHSV(interpHue, 255, (uint8_t)effectiveBrightness);
+
+  const int fStart = max((int)HAIR_FADE_START, 0);
+  const int fEnd = min((int)HAIR_FADE_END, lastIndex);
+  if (fEnd >= fStart) {
+    for (int i = fStart; i <= fEnd; i++) {
+      leds2[i] = fadeColor;
+    }
+  }
+
+  if (HAIR_BRIGHTNESS < 255) {
+    nscale8_video(leds2, NUM_LEDS2, (uint8_t)HAIR_BRIGHTNESS);
+  }
+
+  s_hairHueOffset = (uint8_t)(s_hairHueOffset + HAIR_SPEED_RAINBOW);
+  s_hairFadeBrightness += s_hairFadeDirection * HAIR_SPEED_FADE;
+  if (s_hairFadeBrightness >= 255) {
+    s_hairFadeBrightness = 255;
+    s_hairFadeDirection = -1;
+  } else if (s_hairFadeBrightness <= 0) {
+    s_hairFadeBrightness = 0;
+    s_hairFadeDirection = 1;
+  }
+}
 #endif
 
 static uint32_t lastWaveTime = 0;
@@ -283,10 +372,7 @@ static uint32_t s_lastWifiCheckMs = 0;
 #endif
 
 static inline void showStrips() {
-  strip1.show();
-#if ENABLE_HAIR_STRIP
-  strip2.show();
-#endif
+  FastLED.show();
 }
 
 static inline float clamp01(float x) {
@@ -325,20 +411,21 @@ static inline float beatPulseRatio(float beatPeriodMs, uint32_t nowMs) {
   return clampf(ratio, BRIGHTNESS_MIN_RATIO, BRIGHTNESS_MAX_RATIO);
 }
 
-static inline void applyPulseToStrip(Adafruit_NeoPixel& strip, uint16_t count, float ratio) {
+static inline void applyPulseToStrip(CRGB* leds, uint16_t count, float ratio) {
   if (ratio >= 0.999f) return;
-  uint8_t* pixels = strip.getPixels();
-  if (!pixels) return;
-  const uint32_t totalBytes = (uint32_t)count * 3u;
   if (ratio <= 0.0f) {
-    for (uint32_t i = 0; i < totalBytes; i++) pixels[i] = 0;
+    fill_solid(leds, count, CRGB::Black);
     return;
   }
   uint16_t scale = (uint16_t)lroundf(ratio * 255.0f);
   if (scale > 255) scale = 255;
-  for (uint32_t i = 0; i < totalBytes; i++) {
-    const uint16_t v = (uint16_t)pixels[i] * scale;
-    pixels[i] = (uint8_t)((v + 127) / 255);
+  for (uint16_t i = 0; i < count; i++) {
+    const uint16_t r = (uint16_t)leds[i].r * scale;
+    const uint16_t g = (uint16_t)leds[i].g * scale;
+    const uint16_t b = (uint16_t)leds[i].b * scale;
+    leds[i].r = (uint8_t)((r + 127) / 255);
+    leds[i].g = (uint8_t)((g + 127) / 255);
+    leds[i].b = (uint8_t)((b + 127) / 255);
   }
 }
 
@@ -867,10 +954,10 @@ static void handleFrame() {
   static uint8_t frame[NUM_LEDS1 * 3];
 
   for (uint16_t i = 0; i < NUM_LEDS1; i++) {
-    const uint32_t c = strip1.getPixelColor(i);
-    frame[(i * 3) + 0] = (uint8_t)((c >> 16) & 0xFF); // R
-    frame[(i * 3) + 1] = (uint8_t)((c >> 8) & 0xFF);  // G
-    frame[(i * 3) + 2] = (uint8_t)(c & 0xFF);         // B
+    const CRGB c = leds1[i];
+    frame[(i * 3) + 0] = c.r;
+    frame[(i * 3) + 1] = c.g;
+    frame[(i * 3) + 2] = c.b;
   }
 
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -1086,7 +1173,7 @@ void runLedAnimation() {
   // Tell the wave engine how many frames the current animation has.
   setWaveFrameCount((int)frames.size());
 
-  strip1.clear();
+  fill_solid(leds1, NUM_LEDS1, CRGB::Black);
 
   static uint32_t lastSpacingMs = 0;
   const size_t wavesBefore = getWaves().size();
@@ -1114,7 +1201,7 @@ void runLedAnimation() {
       wave.noseWidth,
       frameBrightness,
       wave.reverse,
-      strip1,
+      leds1,
       NUM_LEDS1
     );
   }
@@ -1235,10 +1322,7 @@ void runLedAnimation() {
 #endif
 
   if (pulseRatio < 0.999f) {
-    applyPulseToStrip(strip1, NUM_LEDS1, pulseRatio);
-#if ENABLE_HAIR_STRIP
-    applyPulseToStrip(strip2, NUM_LEDS2, pulseRatio);
-#endif
+    applyPulseToStrip(leds1, NUM_LEDS1, pulseRatio);
   }
 }
 
@@ -1267,21 +1351,18 @@ void setup() {
   }
 #endif
 
-  strip1.begin();
+  FastLED.addLeds<NEOPIXEL, DATA_PIN1>(leds1, NUM_LEDS1);
 #if ENABLE_HAIR_STRIP
-  strip2.begin();
+  FastLED.addLeds<NEOPIXEL, DATA_PIN2>(leds2, NUM_LEDS2);
 #endif
 
-  // Keep NeoPixel's internal brightness scaler at full.
+  // Keep FastLED's global brightness scaler at full.
   // Beat pulsing is handled in the frame renderer.
-  strip1.setBrightness(255);
-#if ENABLE_HAIR_STRIP
-  strip2.setBrightness(255);
-#endif
+  FastLED.setBrightness(255);
 
-  strip1.clear();
+  fill_solid(leds1, NUM_LEDS1, CRGB::Black);
 #if ENABLE_HAIR_STRIP
-  strip2.clear();
+  fill_solid(leds2, NUM_LEDS2, CRGB::Black);
 #endif
   showStrips();
 
@@ -1319,13 +1400,22 @@ void loop() {
   }
 
   const uint16_t count = (TEST_LED_COUNT < NUM_LEDS1) ? TEST_LED_COUNT : NUM_LEDS1;
-  const uint32_t color = on ? strip1.Color(255, 255, 255) : 0;
+  const CRGB color = on ? CRGB(255, 255, 255) : CRGB::Black;
   for (uint16_t i = 0; i < count; i++) {
-    strip1.setPixelColor(i, color);
+    leds1[i] = color;
   }
   for (uint16_t i = count; i < NUM_LEDS1; i++) {
-    strip1.setPixelColor(i, 0);
+    leds1[i] = CRGB::Black;
   }
+#if ENABLE_HAIR_STRIP
+  const uint16_t count2 = NUM_LEDS2;
+  for (uint16_t i = 0; i < count2; i++) {
+    leds2[i] = color;
+  }
+  for (uint16_t i = count2; i < NUM_LEDS2; i++) {
+    leds2[i] = CRGB::Black;
+  }
+#endif
   showStrips();
   delay(10);
   return;
@@ -1358,7 +1448,7 @@ void loop() {
 #endif
 
 #if ENABLE_HAIR_STRIP
-  // Hair rendering will be re-enabled later.
+  updateHairStrip(now);
 #endif
 
 #if PROFILE_PERF

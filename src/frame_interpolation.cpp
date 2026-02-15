@@ -10,7 +10,7 @@ void renderInterpolatedFrame(
   float widthAhead,
   int brightness,
   bool reverse,
-  Adafruit_NeoPixel& strip,
+  CRGB* leds,
   int ledCount
 ) {
   const int totalRings = (int)frames.size();
@@ -29,11 +29,12 @@ void renderInterpolatedFrame(
     if (v < 0) v = 0;
     if (v > 255) v = 255;
 
-    const uint32_t color = Adafruit_NeoPixel::ColorHSV((uint16_t)baseHue, 255, (uint8_t)v);
+    const uint8_t hue8 = (uint8_t)(baseHue >> 8);
+    const CHSV color(hue8, 255, (uint8_t)v);
 
     for (int led : frames[waveFrameIndex]) {
       if (led >= 0 && led < ledCount) {
-        strip.setPixelColor((uint16_t)led, color);
+        leds[led] = color;
       }
     }
   }
