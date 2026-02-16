@@ -23,13 +23,16 @@ void setWaveFrameCount(int frameCount);
 void resetWaves();
 bool updateWaves(uint32_t nowMs);
 const std::vector<Wave>& getWaves();
+std::vector<Wave>& getWavesMutable();
 void dropOldestWave();
-void applyWaveSpacing(float mix, float minNose, float maxNose);
 void setWaveSpeedBaseFps(float fps);
+void setWaveSpeedBase(float base);
+void setWaveSpeedRange(float range);
+void setWaveSpeedMultiplier(float multiplier);
 void addWave(uint32_t hue,
              int8_t speedControl = 0,
              float nose = 1.0f,
              float tail = 3.0f,
              bool reverse = false,
-             int16_t hueStartDeg = 0,
-             int16_t hueEndDeg = 0);
+             int32_t hueStartOffset = 0,
+             int32_t hueEndOffset = 0);

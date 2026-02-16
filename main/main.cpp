@@ -168,7 +168,7 @@ extern "C" void app_main(void) {
 
   animationEngineInit(s_brain_buf, NUM_LEDS1);
   resetWaves();
-  setWaveSpeedBaseFps(1000.0f / (float)DELAY_MS);
+  setWaveSpeedBaseFps(WAVE_SPEED_BASE_FPS);
   animationEngineReset(now_ms());
 
   normalizeConfig();

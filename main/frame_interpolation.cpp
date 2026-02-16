@@ -3,7 +3,7 @@
 
 #include <math.h>
 
-void renderInterpolatedFrame(
+int renderInterpolatedFrame(
   const std::vector<std::vector<int>>& frames,
   float waveCenter,
   uint32_t baseHue,
@@ -15,6 +15,7 @@ void renderInterpolatedFrame(
   int ledCount
 ) {
   const int totalRings = (int)frames.size();
+  int litCount = 0;
 
   for (int i = 0; i < totalRings; i++) {
     const int waveFrameIndex = i;
@@ -40,7 +41,9 @@ void renderInterpolatedFrame(
     for (int led : frames[waveFrameIndex]) {
       if (led >= 0 && led < ledCount) {
         leds[led] = color;
+        if (v > 1) litCount++;
       }
     }
   }
+  return litCount;
 }

@@ -77,6 +77,7 @@ static volatile float s_beatStrength = 0.0f;
 static float s_avgBeatIntervalMs = 500.0f;
 static uint32_t s_lastBeatMs = 0;
 static uint32_t s_lastBeatIntervalMs = 0;
+static uint32_t s_lastRealBeatMs = 0;
 static float s_bassEma = 0.0f;
 static float s_fluxEma = 0.0f;
 static float s_prevFlux = 0.0f;
@@ -109,6 +110,10 @@ bool consumeBeat(float* strength) {
 
 float getAverageBeatIntervalMs() {
   return s_avgBeatIntervalMs;
+}
+
+uint32_t getLastRealBeatMs() {
+  return s_lastRealBeatMs;
 }
 
 float getAverageBpm() {
@@ -345,6 +350,7 @@ void processAudio() {
     updateBeatIntervalAverage(now);
     s_lastBeatIntervalMs = intervalMs;
     s_lastBeatMs = now;
+    s_lastRealBeatMs = now;
     s_audioTelemetry.lastBeatMs = s_lastBeatMs;
     s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
   }

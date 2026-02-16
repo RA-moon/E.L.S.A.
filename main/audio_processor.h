@@ -18,6 +18,9 @@ bool consumeBeat(float* strength = nullptr);
 // Average time between detected beats (milliseconds).
 float getAverageBeatIntervalMs();
 
+// Timestamp of last real (detected) beat in ms (0 if none yet).
+uint32_t getLastRealBeatMs();
+
 // Convenience: 60000 / average beat interval.
 float getAverageBpm();
 

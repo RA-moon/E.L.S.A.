@@ -16,13 +16,29 @@ static inline uint16_t clampU16(long value, long lo, long hi) {
   return (uint16_t)value;
 }
 
+static inline float clampF(float value, float lo, float hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
 RuntimeConfig g_config = {
   BRIGHTNESS1,
+  BEAT_PULSE_MIN_RATIO,
+  BEAT_PULSE_DECAY_RATIO,
   BEAT_DECAY_MIN_MS,
   BEAT_DECAY_MAX_MS,
   0,
   NO_BEAT_FALLBACK_MS,
   MAX_ACTIVE_WAVES,
+  BEAT_WAVE_EVERY_N,
+  WAVE_SPEED_BASE,
+  WAVE_SPEED_RANGE,
+  WAVE_SPEED_MULTIPLIER,
+  WAVE_NOSE_RATIO,
+  WAVE_GAP_RATIO,
+  WAVE_SPAWN_RATIO,
+  WAVE_SPAWN_JITTER,
   (ENABLE_BEAT_WAVES != 0),
   (ENABLE_FALLBACK_WAVES != 0),
   true,
@@ -38,6 +54,22 @@ RuntimeConfig g_config = {
 
 void normalizeConfig() {
   g_config.brightness = clampU8((int)g_config.brightness, 0, 255);
+  g_config.beatPulseMinRatio = clampF(g_config.beatPulseMinRatio, 0.0f, 1.0f);
+  g_config.beatPulseDecayRatio = clampF(g_config.beatPulseDecayRatio, 0.1f, 5.0f);
+  g_config.beatWaveEveryN = clampU8((int)g_config.beatWaveEveryN, 1, 32);
+  g_config.waveSpeedBase = clampF(g_config.waveSpeedBase, 0.0f, 5.0f);
+  g_config.waveSpeedRange = clampF(g_config.waveSpeedRange, 1.0f, 5.0f);
+  g_config.waveSpeedMultiplier = clampF(g_config.waveSpeedMultiplier, 0.1f, 5.0f);
+  g_config.waveNoseRatio = clampF(g_config.waveNoseRatio, 0.0f, 1.0f);
+  g_config.waveGapRatio = clampF(g_config.waveGapRatio, 0.0f, 1.0f);
+  g_config.waveSpawnRatio = clampF(g_config.waveSpawnRatio, 0.1f, 5.0f);
+  g_config.waveSpawnJitter = clampF(g_config.waveSpawnJitter, 0.0f, 1.0f);
+  const float waveRatioSum = g_config.waveNoseRatio + g_config.waveGapRatio;
+  if (waveRatioSum > 1.0f && waveRatioSum > 0.0f) {
+    const float inv = 1.0f / waveRatioSum;
+    g_config.waveNoseRatio *= inv;
+    g_config.waveGapRatio *= inv;
+  }
   g_config.beatDecayMinMs = clampU16((long)g_config.beatDecayMinMs, 50, 5000);
   g_config.beatDecayMaxMs = clampU16((long)g_config.beatDecayMaxMs, 50, 10000);
   if (g_config.beatDecayMinMs > g_config.beatDecayMaxMs) {

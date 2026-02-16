@@ -31,11 +31,23 @@
 #define NO_BEAT_FALLBACK_MS 800
 #define AUDIO_INTERVAL    15
 #define MAX_ACTIVE_WAVES  20
-#define WAVE_SPACING_MIX  0.35f
 #define WAVE_SPACING_INTERVAL_MS 60
-#define WAVE_NOSE_MIN 0.2f
-#define WAVE_NOSE_MAX 3.0f
-#define WAVE_WIDTH_SCALE 1.5f
+// Ratios of the spacing between wave peaks (nose + gap + tail = 1.0).
+#define WAVE_NOSE_RATIO 0.20f  // fraction of spacing used for nose
+#define WAVE_GAP_RATIO  0.20f  // fraction of spacing left dark (gap)
+// Tail ratio is derived as: 1 - WAVE_NOSE_RATIO - WAVE_GAP_RATIO (clamped >= 0).
+#define WAVE_SPAWN_RATIO 1.0f  // interval multiplier vs beat period (0.5 = twice per beat)
+#define WAVE_SPAWN_JITTER 0.20f // 0..1 random jitter on spawn interval
+#define WAVE_SPEED_BASE 0.5f   // base speed (at speed control = 0)
+#define WAVE_SPEED_RANGE 2.0f  // multiplier range (1 = no change, 2 = 0.5x..2x)
+#define WAVE_SPEED_MULTIPLIER 1.0f // global multiplier for wave travel speed
+#define WAVE_SPEED_BASE_FPS 60.0f  // timebase for wave speed (decoupled from render fps)
+#define BEAT_WAVE_EVERY_N 1  // 1 = every beat, 2 = every 2nd beat, etc.
+
+// Auto animation switching
+#define BPM_SWITCH_THRESHOLD 0.20f      // 20% change
+#define BPM_SWITCH_WINDOW_MS 5000       // over 5 seconds
+#define AUTO_SWITCH_INTERVAL_MS 60000   // fallback (no bpm change)
 
 // Run audio processing in a dedicated FreeRTOS task.
 #ifndef AUDIO_TASK_ENABLE
@@ -90,13 +102,15 @@
 #define BEAT_DECAY_MAX_MS  1500
 #define BEAT_DECAY_EASE_OUT   1   // 1 = quadratic ease-out, 0 = linear
 #define BEAT_PERIOD_EMA_ALPHA 0.05f
+#define BEAT_PULSE_MIN_RATIO 0.10f // 0..1 (min brightness during beat decay)
+#define BEAT_PULSE_DECAY_RATIO 1.00f // decay time = ratio * last beat interval
 
 // Fade beat-driven state back toward startup defaults after inactivity.
 #ifndef ENABLE_FADE_TO_STARTUP
 #define ENABLE_FADE_TO_STARTUP 1
 #endif
 #define FADE_TO_STARTUP_IDLE_MS 10000
-#define FADE_TO_STARTUP_DURATION_MS 10000
+#define FADE_TO_STARTUP_DURATION_MS 20000
 
 // Waves are triggered on detected beats. If no beats are detected for a while,
 // the fallback timer will still inject occasional waves so the strip doesn't go idle.
@@ -134,16 +148,8 @@
 #define PM_MAX_CPU_MHZ 240
 #define PM_MIN_CPU_MHZ 80
 
-// Wave envelope (relative units in animation frames).
-// Min values define the baseline width (sum = 1.0).
-// Max values define the peak width (sum = 4.0).
-#define WAVE_ATTACK_MIN   0.2f
-#define WAVE_SUSTAIN_MIN  0.3f
-#define WAVE_RELEASE_MIN  0.3f
-#define WAVE_DECAY_MIN    0.2f
-
-#define WAVE_ATTACK_MAX   0.8f
-#define WAVE_SUSTAIN_MAX  1.2f
-#define WAVE_RELEASE_MAX  1.2f
-#define WAVE_DECAY_MAX    0.8f
+// Wave falloff curve (cubic bezier y control points, 0..1).
+// 0.0/1.0 matches smoothstep; lower P1 or higher P2 changes easing.
+#define WAVE_FALLOFF_P1   0.0f
+#define WAVE_FALLOFF_P2   1.0f
 #define PROFILE_INTERVAL_MS   2000

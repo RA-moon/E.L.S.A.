@@ -3,7 +3,9 @@
 #include "animated_lines.h"
 #include "animated_circles_reversed.h"
 #include "animated_lines_reversed.h"
+#include "elsa_config.h"
 
+#include "esp_random.h"
 #include "esp_timer.h"
 #include <algorithm>
 #include <math.h>
@@ -21,10 +23,17 @@ static bool autoMode = true;
 static std::vector<std::vector<int>> activeFrames;
 static float s_lastBpm = 0.0f;
 static float s_lastSwitchBpm = 0.0f;
+static uint32_t s_bpmWindowStartMs = 0;
+static float s_bpmWindowStartBpm = 0.0f;
 
-static constexpr float kBpmSwitchThreshold = 0.05f; // 5%
-static constexpr unsigned long kBpmSwitchMinIntervalMs = 3000;
-static constexpr unsigned long kAutoSwitchIntervalMs = 30000;
+static int pickRandomAnimation(int count, int current) {
+    if (count <= 1) return current;
+    int next = current;
+    while (next == current) {
+        next = (int)(esp_random() % (uint32_t)count);
+    }
+    return next;
+}
 
 static FrameFunction animations[] = {
     getAnimationFramesCircles,
@@ -99,6 +108,8 @@ void updateAnimationSwitch() {
         activeFrames = animations[currentAnimation]();
         lastSwitchTime = now;
         s_lastSwitchBpm = s_lastBpm;
+        s_bpmWindowStartMs = now;
+        s_bpmWindowStartBpm = s_lastBpm;
         return;
     }
 
@@ -108,24 +119,36 @@ void updateAnimationSwitch() {
             activeFrames = animations[currentAnimation]();
             lastSwitchTime = now;
             s_lastSwitchBpm = s_lastBpm;
+            s_bpmWindowStartMs = now;
+            s_bpmWindowStartBpm = s_lastBpm;
         }
         return;
     }
 
-    if (s_lastBpm > 0.0f && s_lastSwitchBpm > 0.0f) {
-        const float diff = fabsf(s_lastBpm - s_lastSwitchBpm) / s_lastSwitchBpm;
-        if (diff >= kBpmSwitchThreshold && (now - lastSwitchTime) >= kBpmSwitchMinIntervalMs) {
-            lastSwitchTime = now;
-            currentAnimation = (currentAnimation + 1) % count;
-            activeFrames = animations[currentAnimation]();
-            s_lastSwitchBpm = s_lastBpm;
-            return;
+    if (s_lastBpm > 0.0f) {
+        if (s_bpmWindowStartMs == 0 || s_bpmWindowStartBpm <= 0.0f) {
+            s_bpmWindowStartMs = now;
+            s_bpmWindowStartBpm = s_lastBpm;
+        } else if ((now - s_bpmWindowStartMs) >= BPM_SWITCH_WINDOW_MS) {
+            const float diff = fabsf(s_lastBpm - s_bpmWindowStartBpm) / s_bpmWindowStartBpm;
+            s_bpmWindowStartMs = now;
+            s_bpmWindowStartBpm = s_lastBpm;
+            if (diff >= BPM_SWITCH_THRESHOLD) {
+                lastSwitchTime = now;
+                currentAnimation = pickRandomAnimation(count, currentAnimation);
+                activeFrames = animations[currentAnimation]();
+                s_lastSwitchBpm = s_lastBpm;
+                return;
+            }
         }
+    } else {
+        s_bpmWindowStartMs = 0;
+        s_bpmWindowStartBpm = 0.0f;
     }
 
-    if ((now - lastSwitchTime) >= kAutoSwitchIntervalMs) {
+    if ((now - lastSwitchTime) >= AUTO_SWITCH_INTERVAL_MS) {
         lastSwitchTime = now;
-        currentAnimation = (currentAnimation + 1) % count;
+        currentAnimation = pickRandomAnimation(count, currentAnimation);
         activeFrames = animations[currentAnimation]();
         s_lastSwitchBpm = s_lastBpm;
     }

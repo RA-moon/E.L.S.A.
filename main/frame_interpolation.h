@@ -5,7 +5,7 @@
 
 #include "led_utils.h"
 
-void renderInterpolatedFrame(
+int renderInterpolatedFrame(
   const std::vector<std::vector<int>>& frames,
   float waveCenter,
   uint32_t baseHue,
