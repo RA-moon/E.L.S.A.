@@ -9,7 +9,7 @@
 // You mentioned the hair data line is on GPIO2; change as needed.
 // Default is off (override with -DENABLE_HAIR_STRIP=1).
 #ifndef ENABLE_HAIR_STRIP
-#define ENABLE_HAIR_STRIP  0
+#define ENABLE_HAIR_STRIP  1
 #endif
 #define DATA_PIN2          2
 #define NUM_LEDS2          44
