@@ -7,13 +7,13 @@
 - Set auto fallback interval to 30s and limit it to when BPM is unavailable.
 
 ## Evidence
-- `pio run -e esp32-s3-super-mini` succeeded (FastLED warning about `esp_memory_utils.h` noted).
+- `pio run -e esp32-s3-super-mini-idf` succeeded.
 
 ## Commands
-- `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini` -> success
+- `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` -> success
 
 ## Tests/Checks
-- `pio run -e esp32-s3-super-mini`
+- `pio run -e esp32-s3-super-mini-idf`
 
 ## Risks/Rollback
 - If you want time-based switching regardless of BPM, remove the BPM-availability guard.

@@ -5,7 +5,7 @@
 
 ## Changes
 - Document full wiring diagram and button pin in README.
-- Update the CPU-cost note to reflect FastLED usage.
+- Update the CPU-cost note to reflect LED output cost.
 
 ## Evidence
 - README updated.

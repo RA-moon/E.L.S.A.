@@ -1,11 +1,11 @@
 # E.L.S.A. (ESP32-S3 LED + Audio Beat Visualizer)
 
-ESP32-S3 project for driving addressable LEDs with audio-reactive animations and a small web UI for telemetry/control.
+ESP32-S3 project for driving addressable LEDs with audio-reactive animations (ESP-IDF + RMT + esp-dsp).
 
 ## Features
 - Audio beat detection (SPH0645 I2S mic)
 - Multiple animation patterns (auto or fixed)
-- Web UI telemetry + live config controls
+- ESP-IDF build (RMT LED output + esp-dsp FFT)
 - PlatformIO build + upload
 
 ## Hardware (current wiring)
@@ -17,7 +17,7 @@ ESP32-S3 project for driving addressable LEDs with audio-reactive animations and
   - LRCLK/WS: GPIO6
   - DOUT (mic) -> DIN: GPIO7
   - SEL -> GND (left channel)
-  - Pins default to `I2S_BCLK_PIN=5`, `I2S_WS_PIN=6`, `I2S_DIN_PIN=7` in `src/audio_processor.cpp`.
+  - Pins default to `I2S_BCLK_PIN=5`, `I2S_WS_PIN=6`, `I2S_DIN_PIN=7` in `main/audio_processor.cpp`.
     To override, set `-DI2S_BCLK_PIN=...`, `-DI2S_WS_PIN=...`, `-DI2S_DIN_PIN=...` in `platformio.ini`.
 - Button: GPIO4 (active-low to GND, internal pull-up enabled)
 
@@ -47,11 +47,23 @@ ESP32-S3 Super Mini
 
 ## Build + Upload (PlatformIO)
 ```bash
-pio run -e esp32-s3-super-mini
-pio run -e esp32-s3-super-mini -t upload
+pio run -e esp32-s3-super-mini-idf
+pio run -e esp32-s3-super-mini-idf -t upload
 ```
 
 If upload is flaky, hold BOOT, tap RESET, then release BOOT after "Connecting..." appears.
+
+### ESP-IDF Environment
+The IDF entry point is `main/main.cpp`.
+Current status:
+- LED output uses an RMT-based WS2812 encoder (`main/led_strip_driver.c`).
+- Audio capture uses ESP-IDF I2S and esp-dsp FFT (`main/audio_processor.cpp`).
+- The IDF build depends on the esp-dsp component.
+  This repo vendors it under `components/esp-dsp` (cloned from Espressif).
+  If it’s missing, fetch it with:
+  ```bash
+  git clone https://github.com/espressif/esp-dsp.git components/esp-dsp
+  ```
 
 ## Formatting
 ```bash
@@ -61,56 +73,16 @@ If upload is flaky, hold BOOT, tap RESET, then release BOOT after "Connecting...
 ## Architecture
 See `docs/architecture.md`.
 
-## Wi-Fi
-Set credentials in `include/wifi_secrets.h`:
-```c
-#define WIFI_SSID "your-ssid"
-#define WIFI_PASSWORD "your-password"
-```
-ESP32-S3 supports **2.4 GHz only**.
-
-## OTA
-Set OTA credentials in `include/ota_secrets.h`:
-```c
-#define OTA_HOSTNAME "your-device-name"
-#define OTA_PASSWORD "your-ota-password"
-// Optional fixed IP for uploads:
-// #define OTA_IP "192.168.31.154"
-```
-When using the OTA env (`esp32-s3-super-mini-ota`), PlatformIO reads
-`OTA_PASSWORD` directly from `include/ota_secrets.h`. If `OTA_IP` is set, it
-overrides the upload target; otherwise the OTA hostname is used (`<hostname>.local`).
-
-## Web UI
-When Wi-Fi connects, Serial prints:
-```
-WiFi connected: <ip>
-Web telemetry ready: http://<ip>/
-```
-Endpoints:
-- `/` UI
-- `/status` JSON
-- `/frame` raw LED frame (3 bytes/LED)
-- `/config` get/set runtime config
-
-Example:
-```
-http://<ip>/config?mode=fixed&anim=1&brightness=80&beatMin=160&beatMax=1500&fallbackMs=800&maxWaves=20&beatWaves=1&fallbackWaves=1
-```
-
 ## Audio tuning
-Shared defaults live in `include/audio_config.h`:
+Shared defaults live in `main/audio_processor.cpp`:
 ```c
 #define AUDIO_SAMPLE_RATE_HZ 32000
 #define AUDIO_FFT_SAMPLES 256
 ```
-The firmware will try the primary sample rate and fall back if init fails.
-Note: On ESP32-S3, `audio_config.h` sets the defaults above; on other targets,
-`src/audio_processor.cpp` defaults to `AUDIO_FFT_SAMPLES=512` unless overridden.
+Override with `-DAUDIO_SAMPLE_RATE_HZ=...` / `-DAUDIO_FFT_SAMPLES=...` in `platformio.ini`.
 
 ## Notes
-- `FastLED.show()` is the largest CPU cost.
-- Close the web UI if you want to reduce CPU/network load.
+- LED output (RMT transmit + buffer copy) is the largest CPU cost.
 
 ## Recent Performance/Behavior Changes
 - **Time-based wave motion:** wave position now advances by `speed * dt` (seconds), so speed is stable even if FPS jitters.
@@ -119,8 +91,6 @@ Note: On ESP32-S3, `audio_config.h` sets the defaults above; on other targets,
 - **Wave spacing throttled:** spacing is applied only on changes or every ~`WAVE_SPACING_INTERVAL_MS` instead of every frame.
 - **FFT size reduced:** `AUDIO_FFT_SAMPLES` is now `256` for lower CPU load.
 - **Bass envelope (FFT only):** time-domain envelope is disabled by default (`BASS_ENVELOPE_TIME_DOMAIN=0`).
-- **Web telemetry off by default:** set `-DENABLE_WEB_TELEMETRY=1` in `platformio.ini` `build_flags` to re-enable.
-- **`/config` disabled by default:** set `-DENABLE_CONFIG_ENDPOINT=1` in `platformio.ini` `build_flags` to enable it.
 - **Audio task:** audio processing runs in a dedicated FreeRTOS task (`AUDIO_TASK_ENABLE=1` in `platformio.ini` `build_flags`).
 
 ## How It Works (Detailed)
@@ -129,11 +99,11 @@ This section documents the full audio -> beat -> wave -> LED pipeline.
 All formulas and constants below reflect the current code.
 
 ### Audio Capture + FFT
-**Where:** `src/audio_processor.cpp`
+**Where:** `main/audio_processor.cpp`
 
-1) **I2S read + channel select**  
-Samples are read as interleaved 32-bit stereo. The SPH0645 channel is selected
-and shifted into a signed 24-bit range:
+1) **I2S read (mono) + shift**  
+Samples are read as 32-bit mono. The SPH0645 data is shifted into a signed
+24-bit range:
 
 ```
 sample = (raw >> SPH0645_RAW_SHIFT)
@@ -158,7 +128,7 @@ flux = sum_{b=binMin..binMax} max(0, mag[b] - prevMag[b])
 ```
 
 ### Beat Detection (Spectral Flux)
-**Where:** `src/audio_processor.cpp`
+**Where:** `main/audio_processor.cpp`
 
 The detector uses EMAs for a moving baseline and then looks for a rising flux event:
 
@@ -184,7 +154,7 @@ strength = clamp01((ratio - fluxThreshold) / fluxThreshold)
 If I2S init fails, a lightweight fake beat generator is used so animations still run.
 
 ### Tempo Estimate (Average Beat Interval)
-**Where:** `src/audio_processor.cpp`
+**Where:** `main/audio_processor.cpp`
 
 A rolling buffer (N=6) of recent beat intervals is median-filtered and then smoothed:
 
@@ -198,7 +168,7 @@ avgBeatIntervalMs =
 ```
 
 ### Wave Scheduling
-**Where:** `src/animation_engine.cpp`
+**Where:** `main/animation_engine.cpp`
 
 The beat period is smoothed and clamped to the BPM window before scheduling waves:
 
@@ -226,7 +196,7 @@ if now >= nextWaveDueMs:
 When spawning, the engine respects `maxActiveWaves` and drops the oldest wave if needed.
 
 ### Fallback Waves (No Beat Waves)
-**Where:** `src/animation_engine.cpp`
+**Where:** `main/animation_engine.cpp`
 
 If beat-driven waves are disabled but fallback is enabled:
 
@@ -238,7 +208,7 @@ if !enableBeatWaves && enableFallbackWaves
 ```
 
 ### Wave Speed
-**Where:** `src/animation_engine.cpp`, `src/wave_position.cpp`
+**Where:** `main/animation_engine.cpp`, `main/wave_position.cpp`
 
 1) **Beat period used for waves**  
 The wave scheduler uses a *smoothed* beat period:
@@ -301,7 +271,7 @@ by using a base FPS of `1000 / DELAY_MS` (set in `setup()` via `setWaveSpeedBase
 ---
 
 ### Wave Width (ASRD)
-**Where:** `src/animation_engine.cpp`
+**Where:** `main/animation_engine.cpp`
 
 Wave width is built from **Attack/Sustain/Release/Decay** (ASRD) values that
 interpolate between a **minimum** width (sum=1.0) and **maximum** width (sum=4.0)
@@ -333,7 +303,7 @@ At spawn time, `nose` is clamped to `[WAVE_NOSE_MIN, WAVE_NOSE_MAX]`.
 ---
 
 ### Wave Color
-**Where:** `src/animation_engine.cpp`, `src/wave_position.cpp`, `src/frame_interpolation.cpp`
+**Where:** `main/animation_engine.cpp`, `main/wave_position.cpp`, `main/frame_interpolation.cpp`
 
 1) **Base hue per wave**  
 At spawn time:
@@ -377,7 +347,7 @@ reverse = (random(0, 100) < 25)
 ---
 
 ### Wave Envelope (Spatial Intensity)
-**Where:** `src/waveform.cpp`, `src/frame_interpolation.cpp`
+**Where:** `main/waveform.cpp`, `main/frame_interpolation.cpp`
 
 The spatial envelope uses an **asymmetric smoothstep** around the wave center:
 
@@ -398,7 +368,7 @@ and behind (tail).
 ---
 
 ### Global Brightness + Pulse Envelope
-**Where:** `src/animation_engine.cpp`
+**Where:** `main/animation_engine.cpp`
 
 The base frame brightness is a **global multiplier** applied on top of the wave
 intensity (nose/tail envelope). A separate **pulse envelope** is then applied to
@@ -445,7 +415,7 @@ rgb = rgb * pulseRatio
 ---
 
 ### Animation Switching (Auto Mode)
-**Where:** `src/animation_manager.cpp`
+**Where:** `main/animation_manager.cpp`
 
 Auto mode switches animations based on BPM changes, with a minimum time between switches:
 
@@ -464,24 +434,8 @@ if autoMode and bpm <= 0 and (now - lastSwitchTime) >= 10000:
 
 ---
 
-### Button Control
-**Where:** `src/controls.cpp`
-
-The button uses debounce + a double-tap window:
-
-```
-debounce = 30ms
-doubleTapWindow = 350ms
-
-first tap -> wait for second
-second tap within window -> toggle auto mode
-if window expires and auto mode is off -> advance animation index
-```
-
----
-
 ### Optional: Continuous Wave Spacing
-**Where:** `src/wave_position.cpp`
+**Where:** `main/wave_position.cpp`
 
 Waves moving in the **same direction** are continuously spaced by adjusting
 the follower's **nose width**:
@@ -500,7 +454,7 @@ Nose limits: `WAVE_NOSE_MIN = 0.2`, `WAVE_NOSE_MAX = 3.0`
 ---
 
 ### Wave Lifetime (Removal)
-**Where:** `src/wave_position.cpp`
+**Where:** `main/wave_position.cpp`
 
 Forward waves are removed when:
 ```

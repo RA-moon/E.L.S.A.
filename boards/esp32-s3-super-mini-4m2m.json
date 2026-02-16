@@ -37,7 +37,6 @@
     "openocd_target": "esp32s3.cfg"
   },
   "frameworks": [
-    "arduino",
     "espidf"
   ],
   "name": "ESP32-S3 Super Mini (4MB Flash, 2MB PSRAM)",

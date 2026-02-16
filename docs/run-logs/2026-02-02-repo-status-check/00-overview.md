@@ -7,7 +7,7 @@
 - Added this run log to record the repo status check.
 
 ## Evidence
-- `git status --porcelain` returned no changes for: `Arduino`, `CompAIon`, `Portfolio`, `astralpirates.com`, `mlc-llm`, `text-transfer-app`, `Image-Resize-Helper`.
+- `git status --porcelain` returned no changes for: `CompAIon`, `Portfolio`, `astralpirates.com`, `mlc-llm`, `text-transfer-app`, `Image-Resize-Helper`.
 - `git diff --name-only --diff-filter=U` returned no unmerged paths across the checked repos.
 
 ## Commands (state-changing only)
