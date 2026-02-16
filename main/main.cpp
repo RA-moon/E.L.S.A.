@@ -26,42 +26,21 @@ static led_strip_device_t s_brain = {};
 static led_strip_device_t s_hair = {};
 #endif
 
-static Rgb s_brain_buf[NUM_LEDS1];
+static Rgb* s_brain_buf = nullptr;
 #if ENABLE_HAIR_STRIP
-static Rgb s_hair_buf[NUM_LEDS2];
+static Rgb* s_hair_buf = nullptr;
 #endif
 
-static inline bool copyRgbToDevice(const Rgb* src, led_strip_device_t* dev) {
-  if (!src || !dev || !dev->pixels) return false;
-  uint8_t* out = dev->pixels;
-  bool dirty = false;
-  for (uint16_t i = 0; i < dev->length; i++) {
-    const Rgb c = src[i];
-    // WS2812 expects GRB order.
-    const uint8_t g = c.g;
-    const uint8_t r = c.r;
-    const uint8_t b = c.b;
-    if (out[0] != g || out[1] != r || out[2] != b) {
-      dirty = true;
-      out[0] = g;
-      out[1] = r;
-      out[2] = b;
-    }
-    out += 3;
-  }
-  return dirty;
-}
+#if PROFILE_PERF
+static uint64_t s_renderBusyUs = 0;
+static uint32_t s_renderFrames = 0;
+static uint64_t s_renderWindowStartUs = 0;
+#endif
 
 static void showStrips() {
-  const bool brain_dirty = copyRgbToDevice(s_brain_buf, &s_brain);
-  if (brain_dirty) {
-    led_strip_device_show(&s_brain);
-  }
+  led_strip_device_show_async(&s_brain);
 #if ENABLE_HAIR_STRIP
-  const bool hair_dirty = copyRgbToDevice(s_hair_buf, &s_hair);
-  if (hair_dirty) {
-    led_strip_device_show(&s_hair);
-  }
+  led_strip_device_show_async(&s_hair);
 #endif
 }
 
@@ -71,7 +50,17 @@ static void render_task(void* arg) {
   TickType_t lastWake = xTaskGetTickCount();
 
   for (;;) {
+#if PROFILE_PERF
+    const uint64_t frameStartUs = esp_timer_get_time();
+#endif
     const uint32_t now = now_ms();
+
+    s_brain_buf = (Rgb*)led_strip_device_get_write_buffer(&s_brain);
+    if (!s_brain_buf) {
+      vTaskDelayUntil(&lastWake, delayTicks);
+      continue;
+    }
+    animationEngineSetBuffer(s_brain_buf);
 
 #if TEST_SOLID_COLOR
     static bool on = false;
@@ -86,12 +75,30 @@ static void render_task(void* arg) {
       s_brain_buf[i] = (i < count) ? color : Rgb{0, 0, 0};
     }
 #if ENABLE_HAIR_STRIP
-    for (uint16_t i = 0; i < NUM_LEDS2; i++) {
-      s_hair_buf[i] = color;
+    s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
+    if (s_hair_buf) {
+      for (uint16_t i = 0; i < NUM_LEDS2; i++) {
+        s_hair_buf[i] = color;
+      }
     }
 #endif
     showStrips();
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
+#if PROFILE_PERF
+    const uint64_t frameEndUs = esp_timer_get_time();
+    if (s_renderWindowStartUs == 0) s_renderWindowStartUs = frameStartUs;
+    s_renderBusyUs += (frameEndUs - frameStartUs);
+    s_renderFrames++;
+    const uint64_t windowUs = frameEndUs - s_renderWindowStartUs;
+    if (windowUs >= (uint64_t)PROFILE_INTERVAL_MS * 1000ULL) {
+      const float duty = (windowUs > 0) ? (100.0f * (float)s_renderBusyUs / (float)windowUs) : 0.0f;
+      const float fps = (windowUs > 0) ? (1e6f * (float)s_renderFrames / (float)windowUs) : 0.0f;
+      ESP_LOGI(TAG, "render duty=%.1f%% fps=%.1f", duty, fps);
+      s_renderBusyUs = 0;
+      s_renderFrames = 0;
+      s_renderWindowStartUs = frameEndUs;
+    }
+#endif
     continue;
 #endif
 
@@ -99,10 +106,28 @@ static void render_task(void* arg) {
 
     runLedAnimation(now);
 #if ENABLE_HAIR_STRIP
-    updateHairStrip(now, s_hair_buf, NUM_LEDS2);
+    s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
+    if (s_hair_buf) {
+      updateHairStrip(now, s_hair_buf, NUM_LEDS2);
+    }
 #endif
     showStrips();
     vTaskDelayUntil(&lastWake, delayTicks);
+#if PROFILE_PERF
+    const uint64_t frameEndUs = esp_timer_get_time();
+    if (s_renderWindowStartUs == 0) s_renderWindowStartUs = frameStartUs;
+    s_renderBusyUs += (frameEndUs - frameStartUs);
+    s_renderFrames++;
+    const uint64_t windowUs = frameEndUs - s_renderWindowStartUs;
+    if (windowUs >= (uint64_t)PROFILE_INTERVAL_MS * 1000ULL) {
+      const float duty = (windowUs > 0) ? (100.0f * (float)s_renderBusyUs / (float)windowUs) : 0.0f;
+      const float fps = (windowUs > 0) ? (1e6f * (float)s_renderFrames / (float)windowUs) : 0.0f;
+      ESP_LOGI(TAG, "render duty=%.1f%% fps=%.1f", duty, fps);
+      s_renderBusyUs = 0;
+      s_renderFrames = 0;
+      s_renderWindowStartUs = frameEndUs;
+    }
+#endif
   }
 }
 
@@ -126,11 +151,20 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(led_strip_device_init(&s_hair, DATA_PIN2, NUM_LEDS2));
 #endif
 
-  fill_solid(s_brain_buf, NUM_LEDS1, {0, 0, 0});
+  s_brain_buf = (Rgb*)led_strip_device_get_write_buffer(&s_brain);
+  if (s_brain_buf) {
+    fill_solid(s_brain_buf, NUM_LEDS1, {0, 0, 0});
+  }
 #if ENABLE_HAIR_STRIP
-  fill_solid(s_hair_buf, NUM_LEDS2, {0, 0, 0});
+  s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
+  if (s_hair_buf) {
+    fill_solid(s_hair_buf, NUM_LEDS2, {0, 0, 0});
+  }
 #endif
-  showStrips();
+  led_strip_device_show(&s_brain);
+#if ENABLE_HAIR_STRIP
+  led_strip_device_show(&s_hair);
+#endif
 
   animationEngineInit(s_brain_buf, NUM_LEDS1);
   resetWaves();
@@ -144,7 +178,7 @@ extern "C" void app_main(void) {
   setupI2S();
   audioSchedulerInit();
 
-  const BaseType_t ok = xTaskCreatePinnedToCore(render_task, "render", 6144, NULL, 4, NULL, 1);
+  const BaseType_t ok = xTaskCreatePinnedToCore(render_task, "render", 6144, NULL, RENDER_TASK_PRIORITY, NULL, RENDER_TASK_CORE);
   if (ok != pdPASS) {
     ESP_LOGE(TAG, "Failed to create render task");
   }

@@ -115,6 +115,10 @@ void animationEngineInit(Rgb* leds, uint16_t ledCount) {
   s_ledCount = ledCount;
 }
 
+void animationEngineSetBuffer(Rgb* leds) {
+  s_leds = leds;
+}
+
 void animationEngineReset(uint32_t nowMs) {
   s_lastWaveTime = nowMs;
   s_lastWaveIntervalMs = 0;

@@ -3,8 +3,9 @@
 #include <stdint.h>
 
 struct Rgb {
-  uint8_t r;
+  // Stored as GRB for WS2812 output buffers.
   uint8_t g;
+  uint8_t r;
   uint8_t b;
 };
 

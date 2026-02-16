@@ -41,6 +41,18 @@
 #ifndef AUDIO_TASK_ENABLE
 #define AUDIO_TASK_ENABLE 1
 #endif
+#ifndef AUDIO_TASK_PRIORITY
+#define AUDIO_TASK_PRIORITY 5
+#endif
+#ifndef AUDIO_TASK_CORE
+#define AUDIO_TASK_CORE 0
+#endif
+#ifndef RENDER_TASK_PRIORITY
+#define RENDER_TASK_PRIORITY 4
+#endif
+#ifndef RENDER_TASK_CORE
+#define RENDER_TASK_CORE 1
+#endif
 
 // === Test mode ===
 // Set to 1 to blink white on the first TEST_LED_COUNT LEDs (matching your Arduino IDE test).
