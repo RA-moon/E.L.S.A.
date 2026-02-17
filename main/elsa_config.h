@@ -23,6 +23,7 @@
 // Task delay used when RENDER_TARGET_FPS=0 (tick-paced).
 #define DELAY_MS                  10
 // Optional render FPS target (0 = use DELAY_MS tick pacing).
+// Timing is tick-quantized (no busy-wait).
 // SSOT: set via build flags in platformio.ini (see build_flags: -DRENDER_TARGET_FPS=100).
 #ifndef RENDER_TARGET_FPS
 #define RENDER_TARGET_FPS         0

@@ -1,6 +1,6 @@
 #include "led_utils.h"
 
-void hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v, Rgb* out) {
+static void hsv_to_rgb_raw(uint8_t h, uint8_t s, uint8_t v, Rgb* out) {
   if (!out) return;
   if (s == 0) {
     out->r = v;
@@ -29,6 +29,38 @@ void hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v, Rgb* out) {
     default:
       out->r = v; out->g = p; out->b = q; break;
   }
+}
+
+static bool s_hueLutReady = false;
+static Rgb s_hueLut[256];
+
+static void initHueLut() {
+  for (int i = 0; i < 256; i++) {
+    hsv_to_rgb_raw((uint8_t)i, 255, 255, &s_hueLut[i]);
+  }
+  s_hueLutReady = true;
+}
+
+void hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v, Rgb* out) {
+  if (!out) return;
+  if (s == 0) {
+    out->r = v;
+    out->g = v;
+    out->b = v;
+    return;
+  }
+  if (s == 255) {
+    if (!s_hueLutReady) initHueLut();
+    const Rgb base = s_hueLut[h];
+    const uint16_t r = (uint16_t)base.r * v;
+    const uint16_t g = (uint16_t)base.g * v;
+    const uint16_t b = (uint16_t)base.b * v;
+    out->r = (uint8_t)((r + 127) / 255);
+    out->g = (uint8_t)((g + 127) / 255);
+    out->b = (uint8_t)((b + 127) / 255);
+    return;
+  }
+  hsv_to_rgb_raw(h, s, v, out);
 }
 
 void fill_solid(Rgb* leds, int count, Rgb color) {

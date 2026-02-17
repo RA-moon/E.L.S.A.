@@ -29,23 +29,12 @@ static inline int64_t now_us() {
 
 #if RENDER_TARGET_FPS > 0
 static void delay_until_us(int64_t target_us) {
-  int64_t remaining = target_us - now_us();
+  const int64_t remaining = target_us - now_us();
   if (remaining <= 0) return;
-
   const int64_t tick_us = (int64_t)portTICK_PERIOD_MS * 1000LL;
-  if (remaining > tick_us) {
-    const int64_t sleep_us = remaining - 1000; // leave ~1ms for fine delay
-    if (sleep_us > tick_us) {
-      const TickType_t ticks = (TickType_t)(sleep_us / tick_us);
-      if (ticks > 0) {
-        vTaskDelay(ticks);
-      }
-    }
-  }
-
-  while ((remaining = target_us - now_us()) > 0) {
-    const uint32_t chunk = (remaining > 1000) ? 1000U : (uint32_t)remaining;
-    esp_rom_delay_us(chunk);
+  const TickType_t ticks = (TickType_t)((remaining + tick_us - 1) / tick_us);
+  if (ticks > 0) {
+    vTaskDelay(ticks);
   }
 }
 #endif

@@ -14,6 +14,8 @@
 - Added an explicit unused/reserved block and clarified where `RENDER_TARGET_FPS` is set. (`main/elsa_config.h`)
 - Added direct reference to the `platformio.ini` build flag for `RENDER_TARGET_FPS`. (`main/elsa_config.h`)
 - Clarified that the non-rainbow hair segment is used for the veins animation. (`main/elsa_config.h`)
+- Removed busy-wait for render pacing; timing is now tick-quantized. (`main/main.cpp`, `main/elsa_config.h`)
+- Optimized `hsv_to_rgb` using a hue LUT for s=255 to reduce per-pixel math. (`main/led_utils.cpp`)
 - Added `RENDER_TARGET_FPS=100` to `platformio.ini` build flags. (`platformio.ini`)
 - Skip rendering when the brain strip RMT transfer is in-flight via `led_strip_device_is_busy()` (configurable with `SKIP_RENDER_WHEN_BUSY`). (`main/led_strip_driver.{h,c}`, `main/main.cpp`, `main/elsa_config.h`)
 - Optional render FPS logging via `RENDER_FPS_LOG_MS`. (`main/elsa_config.h`, `main/main.cpp`)
@@ -36,6 +38,10 @@
 - `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
 - `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
 - `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
+- `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
+- `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
+- `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
+- `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
 - `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (failed: CMake configure error; missing `component_requires.temp.cmake`, git repo detection failure)
 - `rm -rf .pio/build/esp32-s3-super-mini-idf` (ok)
 - `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
@@ -45,7 +51,7 @@
 - `/Users/ramunriklin/.platformio/penv/bin/pio run -e esp32-s3-super-mini-idf` (ok)
 
 ## Tests/Checks
-- `pio run -e esp32-s3-super-mini-idf` x13 (passed); x1 (failed: CMake configure error)
+- `pio run -e esp32-s3-super-mini-idf` x17 (passed); x1 (failed: CMake configure error)
 
 ## Config Notes
 - `RENDER_TARGET_FPS`: target FPS (0 uses `DELAY_MS`); default `0`; read in `main/main.cpp`.
