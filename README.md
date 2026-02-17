@@ -93,6 +93,9 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 **LED + Core Animation (`main/elsa_config.h`)**
 - `BRIGHTNESS1` (baseline brightness)
 - `DELAY_MS` (render loop interval)
+- `RENDER_TARGET_FPS` (0 = use `DELAY_MS` tick pacing)
+- `SKIP_RENDER_WHEN_BUSY` (skip render when RMT transfer in flight)
+- `RENDER_FPS_LOG_MS` (0 = disabled)
 - `AUDIO_INTERVAL` (audio task period)
 - `MAX_ACTIVE_WAVES`
 - `WAVE_SPACING_INTERVAL_MS`

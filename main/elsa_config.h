@@ -28,6 +28,19 @@
 
 #define BRIGHTNESS1       80   // baseline (0..255)
 #define DELAY_MS          10
+// Optional render FPS target (0 = use DELAY_MS tick pacing). Non-tick-aligned FPS
+// may busy-wait for up to one RTOS tick.
+#ifndef RENDER_TARGET_FPS
+#define RENDER_TARGET_FPS 100
+#endif
+// Skip rendering when a previous RMT transfer is still in flight.
+#ifndef SKIP_RENDER_WHEN_BUSY
+#define SKIP_RENDER_WHEN_BUSY 1
+#endif
+// Log measured render FPS every N ms (0 = disabled).
+#ifndef RENDER_FPS_LOG_MS
+#define RENDER_FPS_LOG_MS 0
+#endif
 #define NO_BEAT_FALLBACK_MS 800
 #define AUDIO_INTERVAL    15
 #define MAX_ACTIVE_WAVES  20

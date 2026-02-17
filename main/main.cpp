@@ -11,6 +11,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -20,6 +21,33 @@ static const char* TAG = "elsa-idf";
 static inline uint32_t now_ms() {
   return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
+
+static inline int64_t now_us() {
+  return esp_timer_get_time();
+}
+
+#if RENDER_TARGET_FPS > 0
+static void delay_until_us(int64_t target_us) {
+  int64_t remaining = target_us - now_us();
+  if (remaining <= 0) return;
+
+  const int64_t tick_us = (int64_t)portTICK_PERIOD_MS * 1000LL;
+  if (remaining > tick_us) {
+    const int64_t sleep_us = remaining - 1000; // leave ~1ms for fine delay
+    if (sleep_us > tick_us) {
+      const TickType_t ticks = (TickType_t)(sleep_us / tick_us);
+      if (ticks > 0) {
+        vTaskDelay(ticks);
+      }
+    }
+  }
+
+  while ((remaining = target_us - now_us()) > 0) {
+    const uint32_t chunk = (remaining > 1000) ? 1000U : (uint32_t)remaining;
+    esp_rom_delay_us(chunk);
+  }
+}
+#endif
 
 static led_strip_device_t s_brain = {};
 #if ENABLE_HAIR_STRIP
@@ -36,6 +64,10 @@ static uint64_t s_renderBusyUs = 0;
 static uint32_t s_renderFrames = 0;
 static uint64_t s_renderWindowStartUs = 0;
 #endif
+#if RENDER_FPS_LOG_MS > 0
+static uint32_t s_renderFpsFrames = 0;
+static uint64_t s_renderFpsWindowStartUs = 0;
+#endif
 
 static void showStrips() {
   led_strip_device_show_async(&s_brain);
@@ -46,8 +78,13 @@ static void showStrips() {
 
 static void render_task(void* arg) {
   (void)arg;
+#if RENDER_TARGET_FPS > 0
+  const int64_t framePeriodUs = 1000000LL / (int64_t)RENDER_TARGET_FPS;
+  int64_t nextFrameUs = now_us();
+#else
   const TickType_t delayTicks = pdMS_TO_TICKS(DELAY_MS);
   TickType_t lastWake = xTaskGetTickCount();
+#endif
 
   for (;;) {
 #if PROFILE_PERF
@@ -55,64 +92,83 @@ static void render_task(void* arg) {
 #endif
     const uint32_t now = now_ms();
 
-    s_brain_buf = (Rgb*)led_strip_device_get_write_buffer(&s_brain);
-    if (!s_brain_buf) {
-      vTaskDelayUntil(&lastWake, delayTicks);
-      continue;
-    }
-    animationEngineSetBuffer(s_brain_buf);
+#if !TEST_SOLID_COLOR
+    audioSchedulerRun(now, nullptr);
+#endif
 
-#if TEST_SOLID_COLOR
-    static bool on = false;
-    static uint32_t lastToggle = 0;
-    if (now - lastToggle >= 1000) {
-      on = !on;
-      lastToggle = now;
-    }
-    const uint16_t count = (TEST_LED_COUNT < NUM_LEDS1) ? TEST_LED_COUNT : NUM_LEDS1;
-    const Rgb color = on ? Rgb{255, 255, 255} : Rgb{0, 0, 0};
-    for (uint16_t i = 0; i < NUM_LEDS1; i++) {
-      s_brain_buf[i] = (i < count) ? color : Rgb{0, 0, 0};
-    }
-#if ENABLE_HAIR_STRIP
-    s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
-    if (s_hair_buf) {
-      for (uint16_t i = 0; i < NUM_LEDS2; i++) {
-        s_hair_buf[i] = color;
+    bool doRender = true;
+#if SKIP_RENDER_WHEN_BUSY
+    doRender = !led_strip_device_is_busy(&s_brain);
+#endif
+    if (doRender) {
+      s_brain_buf = (Rgb*)led_strip_device_get_write_buffer(&s_brain);
+      if (!s_brain_buf) {
+        doRender = false;
+      } else {
+        animationEngineSetBuffer(s_brain_buf);
       }
     }
-#endif
-    showStrips();
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
-#if PROFILE_PERF
-    const uint64_t frameEndUs = esp_timer_get_time();
-    if (s_renderWindowStartUs == 0) s_renderWindowStartUs = frameStartUs;
-    s_renderBusyUs += (frameEndUs - frameStartUs);
-    s_renderFrames++;
-    const uint64_t windowUs = frameEndUs - s_renderWindowStartUs;
-    if (windowUs >= (uint64_t)PROFILE_INTERVAL_MS * 1000ULL) {
-      const float duty = (windowUs > 0) ? (100.0f * (float)s_renderBusyUs / (float)windowUs) : 0.0f;
-      const float fps = (windowUs > 0) ? (1e6f * (float)s_renderFrames / (float)windowUs) : 0.0f;
-      ESP_LOGI(TAG, "render duty=%.1f%% fps=%.1f", duty, fps);
-      s_renderBusyUs = 0;
-      s_renderFrames = 0;
-      s_renderWindowStartUs = frameEndUs;
-    }
-#endif
-    continue;
-#endif
 
-    audioSchedulerRun(now, nullptr);
-
-    runLedAnimation(now);
+#if TEST_SOLID_COLOR
+    if (doRender) {
+      static bool on = false;
+      static uint32_t lastToggle = 0;
+      if (now - lastToggle >= 1000) {
+        on = !on;
+        lastToggle = now;
+      }
+      const uint16_t count = (TEST_LED_COUNT < NUM_LEDS1) ? TEST_LED_COUNT : NUM_LEDS1;
+      const Rgb color = on ? Rgb{255, 255, 255} : Rgb{0, 0, 0};
+      for (uint16_t i = 0; i < NUM_LEDS1; i++) {
+        s_brain_buf[i] = (i < count) ? color : Rgb{0, 0, 0};
+      }
 #if ENABLE_HAIR_STRIP
-    s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
-    if (s_hair_buf) {
-      updateHairStrip(now, s_hair_buf, NUM_LEDS2);
+      s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
+      if (s_hair_buf) {
+        for (uint16_t i = 0; i < NUM_LEDS2; i++) {
+          s_hair_buf[i] = color;
+        }
+      }
+#endif
+      showStrips();
+#if RENDER_FPS_LOG_MS > 0
+      s_renderFpsFrames++;
+#endif
+    }
+#else
+    if (doRender) {
+      runLedAnimation(now);
+#if ENABLE_HAIR_STRIP
+      s_hair_buf = (Rgb*)led_strip_device_get_write_buffer(&s_hair);
+      if (s_hair_buf) {
+        updateHairStrip(now, s_hair_buf, NUM_LEDS2);
+      }
+#endif
+      showStrips();
+#if RENDER_FPS_LOG_MS > 0
+      s_renderFpsFrames++;
+#endif
     }
 #endif
-    showStrips();
+#if RENDER_FPS_LOG_MS > 0
+    const uint64_t nowUs = esp_timer_get_time();
+    if (s_renderFpsWindowStartUs == 0) s_renderFpsWindowStartUs = nowUs;
+    const uint64_t windowUs = nowUs - s_renderFpsWindowStartUs;
+    if (windowUs >= (uint64_t)RENDER_FPS_LOG_MS * 1000ULL) {
+      const float fps = (windowUs > 0) ? (1e6f * (float)s_renderFpsFrames / (float)windowUs) : 0.0f;
+      ESP_LOGI(TAG, "render fps=%.1f", fps);
+      s_renderFpsFrames = 0;
+      s_renderFpsWindowStartUs = nowUs;
+    }
+#endif
+#if RENDER_TARGET_FPS > 0
+    nextFrameUs += framePeriodUs;
+    const int64_t nowFrameUs = now_us();
+    if (nextFrameUs < nowFrameUs) nextFrameUs = nowFrameUs + framePeriodUs;
+    delay_until_us(nextFrameUs);
+#else
     vTaskDelayUntil(&lastWake, delayTicks);
+#endif
 #if PROFILE_PERF
     const uint64_t frameEndUs = esp_timer_get_time();
     if (s_renderWindowStartUs == 0) s_renderWindowStartUs = frameStartUs;

@@ -486,9 +486,15 @@ void runLedAnimation(uint32_t now) {
 #endif
 
 #if ENABLE_FALLBACK_WAVES
-  if (!g_config.enableBeatWaves && g_config.enableFallbackWaves) {
-    s_nextWaveDueMs = 0;
-    if ((now - s_lastBeatMs >= g_config.fallbackMs) && (now - s_lastWaveTime >= g_config.fallbackMs)) {
+  if (g_config.enableFallbackWaves) {
+    if (!g_config.enableBeatWaves) {
+      s_nextWaveDueMs = 0;
+    }
+    const uint32_t lastRealBeatMs = getLastRealBeatMs();
+    const uint32_t refBeatMs = (lastRealBeatMs > 0) ? lastRealBeatMs : s_lastBeatMs;
+    const bool beatQuiet = (refBeatMs == 0) ? true : (now - refBeatMs >= g_config.fallbackMs);
+    const bool waveQuiet = (now - s_lastWaveTime >= g_config.fallbackMs);
+    if (beatQuiet && waveQuiet) {
       if (getWaves().size() < g_config.maxActiveWaves) {
         const uint32_t hue = (uint32_t)random_int(0, 65536);
         const int8_t speedCtl = speedControlFromPeriod(g_config.fallbackMs);

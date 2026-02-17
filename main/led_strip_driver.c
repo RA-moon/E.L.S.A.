@@ -105,3 +105,8 @@ void led_strip_device_show(led_strip_device_t* dev) {
   if (!led_strip_device_show_async(dev)) return;
   ESP_ERROR_CHECK(rmt_tx_wait_all_done(dev->channel, portMAX_DELAY));
 }
+
+bool led_strip_device_is_busy(const led_strip_device_t* dev) {
+  if (!dev) return false;
+  return dev->in_flight;
+}

@@ -25,6 +25,7 @@ void led_strip_device_set_rgb(led_strip_device_t* dev, uint16_t idx, uint8_t r, 
 uint8_t* led_strip_device_get_write_buffer(led_strip_device_t* dev);
 bool led_strip_device_show_async(led_strip_device_t* dev);
 void led_strip_device_show(led_strip_device_t* dev);
+bool led_strip_device_is_busy(const led_strip_device_t* dev);
 
 #ifdef __cplusplus
 } // extern "C"
