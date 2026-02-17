@@ -103,7 +103,9 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - `WAVE_SPAWN_RATIO`, `WAVE_SPAWN_JITTER`
 - `WAVE_SPEED_BASE`, `WAVE_SPEED_RANGE`, `WAVE_SPEED_MULTIPLIER`, `WAVE_SPEED_BASE_FPS`
 - `BEAT_WAVE_EVERY_N`
-- `WAVE_FALLOFF_P1`, `WAVE_FALLOFF_P2`
+- `WAVE_FALLOFF_NOSE_P1`, `WAVE_FALLOFF_NOSE_P2`
+- `WAVE_FALLOFF_TAIL_P1`, `WAVE_FALLOFF_TAIL_P2`
+- `WAVE_FALLOFF_LUT_ENABLE`, `WAVE_FALLOFF_LUT_SIZE`
 - `BPM_SWITCH_THRESHOLD`, `BPM_SWITCH_WINDOW_MS`, `AUTO_SWITCH_INTERVAL_MS`
 
 **Pulse + Beat Response (`main/elsa_config.h`)**
@@ -154,7 +156,7 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 
 ## Recent Performance/Behavior Changes
 - **Time-based wave motion:** wave position now advances by `speed * dt` (seconds), so speed is stable even if FPS jitters.
-- **Wave speed base FPS:** base FPS is set to `1000 / DELAY_MS` in `app_main()` to preserve legacy speed scaling.
+- **Wave speed base FPS:** base FPS is set to `RENDER_TARGET_FPS` when configured; otherwise `1000 / DELAY_MS` in `app_main()` to preserve legacy speed scaling.
 - **Event-driven wave spawning:** waves are spawned on beat events (real, fake window, or relaxation ticks) instead of a continuous scheduler.
 - **Wave cadence control:** `BEAT_WAVE_EVERY_N` controls how often beat events spawn a wave.
 - **Per-wave rendering without heap allocations:** waves render directly into the LED buffer (no per-wave vector allocations).
