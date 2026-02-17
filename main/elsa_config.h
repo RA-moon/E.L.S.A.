@@ -30,8 +30,10 @@
 #endif
 // 1 = skip rendering when a previous RMT transfer is still in flight.
 // Effect: reduces CPU work, may reduce effective FPS under load.
+// Note: when skipped, animation state also does not advance for that frame.
+// Set to 0 if you prefer stable animation timing over CPU savings.
 #ifndef SKIP_RENDER_WHEN_BUSY
-#define SKIP_RENDER_WHEN_BUSY     1
+#define SKIP_RENDER_WHEN_BUSY     0
 #endif
 // Log measured render FPS every N ms (0 = disabled). Adds log overhead.
 #ifndef RENDER_FPS_LOG_MS
@@ -48,7 +50,7 @@
 // Update cadence (ms). Lower = smoother but more CPU.
 #define HAIR_UPDATE_MS            30
 // Duration of full color cycle (ms).
-#define HAIR_COLOR_CYCLE_DURATION_MS 1800000UL  // 30 minutes
+#define HAIR_COLOR_CYCLE_DURATION_MS 1800000UL  // 30 minutes (cannot be 0!!)
 // Hair strip segment indices (0..NUM_LEDS2-1). Code clamps ranges to bounds.
 // Non-rainbow segment is used for the "veins" animation.
 #define HAIR_RAINBOW_END1         32
@@ -69,25 +71,27 @@
 #define MAX_ACTIVE_WAVES          20
 // Spacing recalculation throttle (ms). Lower = more accurate spacing, more CPU.
 #define WAVE_SPACING_INTERVAL_MS  60
-// Ratios of spacing between wave peaks (nose + gap + tail = 1.0).
-// Nose/gap are clamped 0..1 and normalized if sum > 1.0.
+// Ratios of spacing between wave peaks, normalized from:
+//   nose + gap + nose
+// (same nose ratio is used on both sides of the gap).
 #define WAVE_NOSE_RATIO           0.20f  // fraction of spacing used for nose
 #define WAVE_GAP_RATIO            0.20f  // fraction of spacing left dark (gap)
-// Tail ratio is derived as: 1 - WAVE_NOSE_RATIO - WAVE_GAP_RATIO (clamped >= 0).
-// Spawn interval = beatPeriod * WAVE_SPAWN_RATIO (clamped 0.1..5.0).
-#define WAVE_SPAWN_RATIO          1.0f
-// 0..1 random jitter applied to spawn interval (clamped 0..1).
-#define WAVE_SPAWN_JITTER         0.20f
-// Base wave speed at speed control = 0 (clamped 0..5).
-#define WAVE_SPEED_BASE           0.5f
-// Speed range multiplier (clamped 1..5). >1 expands range around base.
-#define WAVE_SPEED_RANGE          2.0f
+// Default wave speed scalar (1.0 = current baseline travel speed).
+#define WAVE_SPEED_BASE           1.0f
+// Speed variation amount (0..1):
+//   0.0 => no variation
+//   1.0 => 0.5x..2.0x around WAVE_SPEED_BASE
+#define WAVE_SPEED_RANGE          0.0f
+// Per-wave hue drift range in full wheel turns over wave lifetime.
+// Example:
+//   0.0 => no hue drift
+//   1.0 => random drift in [-1, +1] turns
+//   2.0 => random drift in [-2, +2] turns
+#define WAVE_HUE_DRIFT_ROUNDS     1.0f
 // Global speed multiplier (clamped 0.1..5).
 #define WAVE_SPEED_MULTIPLIER     1.0f
-// Base FPS for wave speed scaling (used if render FPS not known).
-#define WAVE_SPEED_BASE_FPS       60.0f
-// Spawn a wave on every Nth beat (clamped 1..32).
-#define BEAT_WAVE_EVERY_N         1
+// Motion calibration in frames/sec when WAVE_SPEED_BASE=1.0 (before multiplier).
+#define WAVE_SPEED_BASE_FPS       9.6f
 
 // Wave falloff curves (cubic bezier y control points, 0..1).
 // 0.0/1.0 matches smoothstep; lower P1 or higher P2 changes easing.
@@ -122,6 +126,7 @@
 #define ENABLE_FADE_TO_STARTUP    1
 #endif
 // Idle time before fade starts (ms).
+// Also defines the window where synthetic beat events may still be generated.
 #define FADE_TO_STARTUP_IDLE_MS   10000
 // Fade duration once idle (ms).
 #define FADE_TO_STARTUP_DURATION_MS 20000
@@ -185,33 +190,21 @@
 #define PM_MAX_CPU_MHZ            240
 #define PM_MIN_CPU_MHZ            80
 
-// === Unused / Reserved (no effect in current code) ===
+// === Unused / Reserved (commented out; no effect in current code) ===
 // Button support is not wired up yet.
-#define BUTTON_PIN                4
-#define BUTTON_ACTIVE_LOW         1
-#define BUTTON_DEBOUNCE_MS        30
-#define BUTTON_DOUBLE_TAP_MS      350
+// #define BUTTON_PIN                4
+// #define BUTTON_ACTIVE_LOW         1
+// #define BUTTON_DEBOUNCE_MS        30
+// #define BUTTON_DOUBLE_TAP_MS      350
 // Beat/wave debug flags are not referenced.
-#ifndef DEBUG_BEAT_TIMING
-#define DEBUG_BEAT_TIMING         0
-#endif
-#ifndef DEBUG_WAVE_TIMING
-#define DEBUG_WAVE_TIMING         0
-#endif
+// #define DEBUG_BEAT_TIMING         0
+// #define DEBUG_WAVE_TIMING         0
 // Web / OTA toggles are defined but not used in the current codebase.
-#ifndef ENABLE_WEB_TELEMETRY
-#define ENABLE_WEB_TELEMETRY      0
-#endif
-#ifndef ENABLE_CONFIG_ENDPOINT
-#define ENABLE_CONFIG_ENDPOINT    0
-#endif
-#define WEB_SERVER_PORT           80
-#define WIFI_CONNECT_TIMEOUT_MS   12000
-#ifndef ENABLE_WIFI_KEEPALIVE
-#define ENABLE_WIFI_KEEPALIVE     0
-#endif
-#define WIFI_KEEPALIVE_INTERVAL_MS 10000
-#define FRAME_MIN_INTERVAL_MS     12
-#ifndef ENABLE_OTA
-#define ENABLE_OTA                1
-#endif
+// #define ENABLE_WEB_TELEMETRY      0
+// #define ENABLE_CONFIG_ENDPOINT    0
+// #define WEB_SERVER_PORT           80
+// #define WIFI_CONNECT_TIMEOUT_MS   12000
+// #define ENABLE_WIFI_KEEPALIVE     0
+// #define WIFI_KEEPALIVE_INTERVAL_MS 10000
+// #define FRAME_MIN_INTERVAL_MS     12
+// #define ENABLE_OTA                1

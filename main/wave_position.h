@@ -32,7 +32,7 @@ void setWaveSpeedMultiplier(float multiplier);
 void addWave(uint32_t hue,
              int8_t speedControl = 0,
              float nose = 1.0f,
-             float tail = 3.0f,
+             float tail = 1.0f,
              bool reverse = false,
              int32_t hueStartOffset = 0,
              int32_t hueEndOffset = 0);

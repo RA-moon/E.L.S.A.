@@ -6,9 +6,10 @@ static std::vector<Wave> waves;
 static int gFrameCount = 10; // default; will be updated from the active animation
 static uint32_t s_lastUpdateMs = 0;
 static float s_waveSpeedBaseFps = 60.0f;
-static float s_waveSpeedBase = 0.01f;
-static float s_waveSpeedRange = 1.0f;
+static float s_waveSpeedBase = 1.0f;
+static float s_waveSpeedRange = 0.0f;
 static float s_waveSpeedMultiplier = 1.0f;
+static constexpr float kWaveTravelMarginFrames = 1.0f;
 
 void setWaveFrameCount(int frameCount) {
   if (frameCount <= 0) return;
@@ -32,13 +33,13 @@ void setWaveSpeedBaseFps(float fps) {
 
 void setWaveSpeedBase(float base) {
   if (base < 0.0f) base = 0.0f;
-  if (base > 5.0f) base = 5.0f;
+  if (base > 10.0f) base = 10.0f;
   s_waveSpeedBase = base;
 }
 
 void setWaveSpeedRange(float range) {
-  if (range < 1.0f) range = 1.0f;
-  if (range > 5.0f) range = 5.0f;
+  if (range < 0.0f) range = 0.0f;
+  if (range > 1.0f) range = 1.0f;
   s_waveSpeedRange = range;
 }
 
@@ -62,7 +63,7 @@ bool updateWaves(uint32_t nowMs) {
   for (auto& wave : waves) {
     wave.center += wave.speed * dt;
 
-    const float endCenter = wave.reverse ? (-wave.tailWidth - 1.0f) : (maxIndex + wave.noseWidth + 1.0f);
+    const float endCenter = wave.reverse ? (-kWaveTravelMarginFrames) : (maxIndex + kWaveTravelMarginFrames);
     const float denom = endCenter - wave.startCenter;
     float progress = 1.0f;
     if (fabsf(denom) > 1e-3f) {
@@ -108,19 +109,22 @@ void addWave(uint32_t hue,
              bool reverse,
              int32_t hueStartOffset,
              int32_t hueEndOffset) {
-  const float ctl = (float)speedControl / 10.0f;
-  float range = s_waveSpeedRange;
-  if (range < 1.0f) range = 1.0f;
-  const float mult = powf(range, ctl);
-  float speed = s_waveSpeedBase * mult;
+  const float ctl = (float)speedControl / 10.0f; // -1..1
+  const float range = s_waveSpeedRange;          // 0..1
+  float speedScale = 1.0f;
+  if (ctl >= 0.0f) {
+    speedScale = 1.0f + (range * ctl);
+  } else {
+    speedScale = 1.0f / (1.0f + (range * -ctl));
+  }
+  float speed = s_waveSpeedBase * speedScale;
   if (speed < 0.0f) speed = 0.0f;
   const float speedPerSec = speed * s_waveSpeedBaseFps * s_waveSpeedMultiplier;
 
   const float maxIndex = maxFrameIndex();
 
   Wave w;
-  const float startOutside = nose * 2.0f;
-  w.center = reverse ? (maxIndex + nose) : -startOutside;
+  w.center = reverse ? (maxIndex + kWaveTravelMarginFrames) : -kWaveTravelMarginFrames;
   w.speed = reverse ? -speedPerSec : speedPerSec;
   w.hue = hue;
   w.baseHue = hue;

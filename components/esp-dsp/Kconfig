@@ -32,6 +32,8 @@ choice DSP_MAX_FFT_SIZE
    help
       This is default FFT size for internal usage.
 
+config DSP_MAX_FFT_SIZE_256
+   bool "256"
 config DSP_MAX_FFT_SIZE_512
    bool "512"
 config DSP_MAX_FFT_SIZE_1024
@@ -50,6 +52,7 @@ endchoice
 
 config DSP_MAX_FFT_SIZE
    int
+   default 256 if DSP_MAX_FFT_SIZE_256
    default 512 if DSP_MAX_FFT_SIZE_512
    default 1024 if DSP_MAX_FFT_SIZE_1024
    default 2048 if DSP_MAX_FFT_SIZE_2048

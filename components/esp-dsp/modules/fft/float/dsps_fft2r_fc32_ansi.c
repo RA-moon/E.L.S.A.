@@ -49,6 +49,7 @@ esp_err_t dsps_fft2r_init_fc32(float *fft_table_buff, int table_size)
     if (table_size == 0) {
         return result;
     }
+    dsps_fft2r_rev_tables_init_fc32();
     if (fft_table_buff != NULL) {
         if (dsps_fft2r_mem_allocated) {
             return ESP_ERR_DSP_REINITIALIZED;

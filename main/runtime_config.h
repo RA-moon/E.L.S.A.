@@ -11,14 +11,11 @@ struct RuntimeConfig {
   int16_t pulseLeadMs;
   uint16_t fallbackMs;
   uint8_t maxActiveWaves;
-  uint8_t beatWaveEveryN;
   float waveSpeedBase;
   float waveSpeedRange;
   float waveSpeedMultiplier;
   float waveNoseRatio;
   float waveGapRatio;
-  float waveSpawnRatio;
-  float waveSpawnJitter;
   bool enableBeatWaves;
   bool enableFallbackWaves;
   bool animationAuto;

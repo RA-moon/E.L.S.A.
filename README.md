@@ -19,7 +19,7 @@ ESP32-S3 project for driving addressable LEDs with audio-reactive animations (ES
   - SEL -> GND (left channel)
   - Pins default to `I2S_BCLK_PIN=5`, `I2S_WS_PIN=6`, `I2S_DIN_PIN=7` in `main/audio_processor.cpp`.
     To override, set `-DI2S_BCLK_PIN=...`, `-DI2S_WS_PIN=...`, `-DI2S_DIN_PIN=...` in `platformio.ini`.
-- Button: GPIO4 (active-low to GND, internal pull-up enabled)
+- Button (reserved, currently unused): GPIO4
 
 ## Wiring Diagram (Full)
 ```
@@ -38,7 +38,7 @@ ESP32-S3 Super Mini
   GPIO7 --------------------> SPH0645 DOUT
   SEL  ---------------------> GND (left channel)
 
-  GPIO4 --------------------> Button -> GND (active-low)
+  GPIO4 --------------------> Button -> GND (reserved / currently unused)
 ```
 
 **Notes:**
@@ -88,21 +88,18 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 **Hardware / Pins (`main/elsa_config.h`)**
 - `DATA_PIN1`, `NUM_LEDS1`
 - `DATA_PIN2`, `NUM_LEDS2`, `ENABLE_HAIR_STRIP`
-- `BUTTON_PIN`, `BUTTON_ACTIVE_LOW`
 
 **LED + Core Animation (`main/elsa_config.h`)**
 - `BRIGHTNESS1` (baseline brightness)
 - `DELAY_MS` (render loop interval)
 - `RENDER_TARGET_FPS` (0 = use `DELAY_MS` tick pacing)
-- `SKIP_RENDER_WHEN_BUSY` (skip render when RMT transfer in flight)
+- `SKIP_RENDER_WHEN_BUSY` (0 = stable timing, 1 = skip render while RMT is busy)
 - `RENDER_FPS_LOG_MS` (0 = disabled)
 - `AUDIO_INTERVAL` (audio task period)
 - `MAX_ACTIVE_WAVES`
 - `WAVE_SPACING_INTERVAL_MS`
-- `WAVE_NOSE_RATIO`, `WAVE_GAP_RATIO` (tail ratio = 1 - nose - gap)
-- `WAVE_SPAWN_RATIO`, `WAVE_SPAWN_JITTER`
+- `WAVE_NOSE_RATIO`, `WAVE_GAP_RATIO` (spacing normalized from `nose + gap + nose`)
 - `WAVE_SPEED_BASE`, `WAVE_SPEED_RANGE`, `WAVE_SPEED_MULTIPLIER`, `WAVE_SPEED_BASE_FPS`
-- `BEAT_WAVE_EVERY_N`
 - `WAVE_FALLOFF_NOSE_P1`, `WAVE_FALLOFF_NOSE_P2`
 - `WAVE_FALLOFF_TAIL_P1`, `WAVE_FALLOFF_TAIL_P2`
 - `WAVE_FALLOFF_LUT_ENABLE`, `WAVE_FALLOFF_LUT_SIZE`
@@ -123,7 +120,7 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 
 **Audio / I2S (`main/audio_processor.cpp`)**
 - `I2S_BCLK_PIN`, `I2S_WS_PIN`, `I2S_DIN_PIN`, `I2S_MCLK_PIN`
-- `SPH0645_CHANNEL`, `SPH0645_RAW_SHIFT`
+- `SPH0645_RAW_SHIFT`
 - `AUDIO_SAMPLE_RATE_HZ`, `AUDIO_FFT_SAMPLES`
 
 **Beat Detector Defaults (`main/runtime_config.cpp`)**
@@ -138,32 +135,31 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - `PROFILE_PERF`, `PROFILE_INTERVAL_MS`
 
 **Buttons / Debug (`main/elsa_config.h`)**
-- `BUTTON_PIN`, `BUTTON_ACTIVE_LOW`, `BUTTON_DEBOUNCE_MS`, `BUTTON_DOUBLE_TAP_MS`
-- `DEBUG_BEAT_TIMING`, `DEBUG_WAVE_TIMING`
 - `TEST_SOLID_COLOR`, `TEST_LED_COUNT`
+- Reserved/commented-out (currently unused): `BUTTON_*`, `DEBUG_*`
 
 **Power (`main/elsa_config.h`)**
 - `ENABLE_DYNAMIC_FREQ_SCALING`, `PM_MAX_CPU_MHZ`, `PM_MIN_CPU_MHZ`
 
 **Networking / OTA (`main/elsa_config.h`)**
-- `ENABLE_WEB_TELEMETRY`, `ENABLE_CONFIG_ENDPOINT`
-- `WEB_SERVER_PORT`, `WIFI_CONNECT_TIMEOUT_MS`, `FRAME_MIN_INTERVAL_MS`
-- `ENABLE_WIFI_KEEPALIVE`, `WIFI_KEEPALIVE_INTERVAL_MS`
-- `ENABLE_OTA`
+- Reserved/commented-out (currently unused): `ENABLE_WEB_TELEMETRY`, `ENABLE_CONFIG_ENDPOINT`,
+  `WEB_SERVER_PORT`, `WIFI_CONNECT_TIMEOUT_MS`, `FRAME_MIN_INTERVAL_MS`,
+  `ENABLE_WIFI_KEEPALIVE`, `WIFI_KEEPALIVE_INTERVAL_MS`, `ENABLE_OTA`
 
 ## Notes
 - LED output (RMT transmit + buffer copy) is the largest CPU cost.
 
 ## Recent Performance/Behavior Changes
 - **Time-based wave motion:** wave position now advances by `speed * dt` (seconds), so speed is stable even if FPS jitters.
-- **Wave speed base FPS:** base FPS is set to `RENDER_TARGET_FPS` when configured; otherwise `1000 / DELAY_MS` in `app_main()` to preserve legacy speed scaling.
+- **Stable timing default:** `SKIP_RENDER_WHEN_BUSY` now defaults to `0` (do not skip animation updates when RMT is busy).
+- **Wave speed base FPS:** wave speed calibration uses `WAVE_SPEED_BASE_FPS` to keep motion consistent across render FPS targets.
 - **Event-driven wave spawning:** waves are spawned on beat events (real, fake window, or relaxation ticks) instead of a continuous scheduler.
-- **Wave cadence control:** `BEAT_WAVE_EVERY_N` controls how often beat events spawn a wave.
+- **Wave cadence:** one wave is spawned per beat event.
 - **Per-wave rendering without heap allocations:** waves render directly into the LED buffer (no per-wave vector allocations).
 - **Wave spacing throttled:** spacing is applied only on changes or every ~`WAVE_SPACING_INTERVAL_MS` instead of every frame.
 - **Wave cleanup:** waves are dropped if they produce no LED > 1 while inside the active frame range.
 - **Forward-only waves:** random reverse is removed; waves start outside the pattern with the nose leading.
-- **Hue drift range expanded:** hue offsets now use raw 16-bit offsets (`-65535..65535`).
+- **Configurable hue drift:** each wave starts at base hue and drifts to a random end offset controlled by `WAVE_HUE_DRIFT_ROUNDS`.
 - **Pulse tuning:** pulse min ratio and decay time are now configurable and driven by **real** beats only.
 - **FFT size reduced:** `AUDIO_FFT_SAMPLES` is now `256` for lower CPU load.
 - **Bass envelope (FFT only):** time-domain envelope is disabled by default (`BASS_ENVELOPE_TIME_DOMAIN=0`).
@@ -228,8 +224,8 @@ strength = clamp01((ratio - fluxThreshold) / fluxThreshold)
 ```
 
 If I2S init fails, a lightweight fake beat generator feeds the animation engine
-during the initial **fake-beat window** (first 10s after the last real beat). After
-that, relaxation ticks keep waves moving.
+during the initial **fake-beat window** (`FADE_TO_STARTUP_IDLE_MS` after the last
+real beat). After that, relaxation ticks keep waves moving.
 
 ### Tempo Estimate (Average Beat Interval)
 **Where:** `main/audio_processor.cpp`
@@ -262,28 +258,22 @@ effectiveIntervalMs = (lastBeatIntervalMs > 0) ? lastBeatIntervalMs : beatPeriod
 beatPeriodMs = clamp(effectiveIntervalMs, beatDecayMinMs, beatDecayMaxMs)
 ```
 
-**Fake beat window (first 10s)**  
-If no real beat is detected but you are still inside the 10s fake window,
+**Fake beat window (`FADE_TO_STARTUP_IDLE_MS`)**  
+If no real beat is detected but you are still inside that fake-beat window,
 a synthetic beat is emitted every `intervalMs` (derived from the last or averaged interval).
 
-**Relaxation ticks (after 10s)**  
+**Relaxation ticks (after fake-beat window)**  
 Once fade-to-startup begins, a periodic tick fires every `beatPeriodMs` to
 continue emitting waves even without beat detections and update the synthetic beat interval.
 Fade completes after `FADE_TO_STARTUP_DURATION_MS` (20s by default).
 
 **Wave cadence**
 
-Waves are spawned using a **timer based on the beat period**, with optional jitter,
-and can also spawn immediately on beat events:
+Waves are spawned **exactly on beat events** (real beat, fake beat in the fake-beat
+window, or relaxation tick during fade-to-startup):
 
 ```
-intervalMs = beatPeriodMs * WAVE_SPAWN_RATIO
-intervalMs *= (1 + rand(-WAVE_SPAWN_JITTER, +WAVE_SPAWN_JITTER))
-
 if beatEvent:
-  if (++beatWaveCounter % beatWaveEveryN == 0):
-    spawn wave
-else if now >= nextSpawnDue:
   spawn wave
 ```
 
@@ -324,17 +314,22 @@ t = clamp((bpm - bpmMin) / (bpmMax - bpmMin), 0..1)
 speedControl = round(-10 + t * 20)    // -10..+10
 ```
 
-Then in `addWave()` (range is a **multiplier** around the base speed):
+Then in `addWave()`:
 
 ```
 ctl = speedControl / 10.0         // -1..+1
-range = max(waveSpeedRange, 1.0)  // 1 = no change
-mult = pow(range, ctl)            // range^-1 .. range^+1
-speed = waveSpeedBase * mult
+range = clamp(waveSpeedRange, 0..1)
+if ctl >= 0:
+  speedScale = 1 + range * ctl
+else:
+  speedScale = 1 / (1 + range * -ctl)
+
+speed = waveSpeedBase * speedScale
 speedPerSec = speed * waveSpeedBaseFps * waveSpeedMultiplier
 ```
 
-Example: `waveSpeedRange = 2` gives `0.5x .. 2x` around the base speed.
+`waveSpeedRange = 0` gives no variation.  
+`waveSpeedRange = 1` gives `0.5x .. 2x` around the base speed.
 
 3) **Position update (time-based)**  
 Wave motion is now time-based:
@@ -353,29 +348,30 @@ multiplier mapping above, then scaled by a base FPS of `WAVE_SPEED_BASE_FPS`
 **Where:** `main/animation_engine.cpp`
 
 Wave width is derived from the **spacing between wave peaks**. That spacing is
-split into **nose**, **gap**, and **tail** ratios:
+split from `nose + gap + nose` (same nose ratio on both sides):
 
 ```
 spacing = distance between wave centers
-nose = spacing * WAVE_NOSE_RATIO
-gap  = spacing * WAVE_GAP_RATIO
-tail = spacing * (1 - WAVE_NOSE_RATIO - WAVE_GAP_RATIO)
+total = 2 * WAVE_NOSE_RATIO + WAVE_GAP_RATIO
+nose = spacing * (WAVE_NOSE_RATIO / total)
+gap  = spacing * (WAVE_GAP_RATIO / total)
+tail = spacing * (WAVE_NOSE_RATIO / total)
 ```
 
 The `nose` is the *leading* side and `tail` is the *trailing* side of the wave
 in animation-frame space (not LED indices). Ratios are clamped so the tail is never
 negative.
 
-**Visual example (ratios = 0.2 / 0.2 / 0.6):**
+**Visual example (`WAVE_NOSE_RATIO=0.2`, `WAVE_GAP_RATIO=0.2`):**
 ```
 peak A  |<--------- spacing between peaks --------->|  peak B
-        [ tail 60% ][ gap 20% ][ nose 20% ]
+        [ tail 33% ][ gap 33% ][ nose 33% ]
 ```
 
 At spawn time, the spacing is estimated from the effective beat period:
 
 ```
-spacing = |speed| * (beatPeriodMs / 1000)
+spacing = (|speed| * (beatPeriodMs / 1000)) / (waveSpeedBase * waveSpeedMultiplier)
 ```
 
 When multiple waves are active, spacing updates recompute **nose** and **tail**
@@ -387,11 +383,11 @@ consistent even as waves drift.
 ### Wave Start Position
 **Where:** `main/wave_position.cpp`
 
-Waves always move forward (no reverse). The starting center is placed **outside**
-the pattern so the nose enters first:
+Waves always move forward (no reverse). The starting center is placed just
+outside the pattern with a fixed margin:
 
 ```
-startCenter = -2 * nose
+startCenter = -1.0
 ```
 
 Frames outside `0..maxIndex` do not light any LEDs.
@@ -406,10 +402,11 @@ baseHue = random(0, 65536)   // 0..65535
 ```
 
 2) **Hue sweep per wave**  
-Each wave also gets a random **start** and **end** offset in raw hue units:
+Each wave starts at base hue (`hueStartOffset = 0`) and gets a random end offset:
 ```
-hueStartOffset = random(-65535, 65536)
-hueEndOffset   = random(-65535, 65536)
+rounds = abs(WAVE_HUE_DRIFT_ROUNDS)
+maxOffset = rounds * 65535
+hueEndOffset = random(-maxOffset, maxOffset)
 ```
 
 During the wave's lifetime:
@@ -419,8 +416,8 @@ offset   = lerp(hueStartOffset, hueEndOffset, progress)
 hue      = (baseHue + offset) mod 65536
 ```
 
-This allows **bidirectional hue rotation**, up to +/-2 full rotations between
-start and end offsets.
+This allows bidirectional hue drift over the wave lifetime.
+Examples: `WAVE_HUE_DRIFT_ROUNDS=0` => no drift, `1` => up to +/-1 full turn.
 
 3) **Final pixel color**  
 For each affected LED:
@@ -520,8 +517,9 @@ Spacing updates run on changes or every `WAVE_SPACING_INTERVAL_MS`. The engine
 measures **actual distance between adjacent wave centers** and recomputes:
 
 ```
-nose = spacing * WAVE_NOSE_RATIO
-tail = spacing * (1 - WAVE_NOSE_RATIO - WAVE_GAP_RATIO)
+total = 2 * WAVE_NOSE_RATIO + WAVE_GAP_RATIO
+nose = spacing * (WAVE_NOSE_RATIO / total)
+tail = spacing * (WAVE_NOSE_RATIO / total)
 ```
 
 This keeps the nose/gap/tail proportions stable regardless of wave speed.
@@ -542,4 +540,6 @@ with no visible contribution.
 
 ---
 
-- **Auto-mode BPM switching:** in auto mode, the animation switches when BPM changes by >=5% (min interval 3s). If BPM is unavailable, it falls back to 10s switching.
+- **Auto-mode BPM switching:** in auto mode, animation switches when BPM changes by
+  at least `BPM_SWITCH_THRESHOLD` over `BPM_SWITCH_WINDOW_MS`; otherwise it falls
+  back to `AUTO_SWITCH_INTERVAL_MS`.

@@ -20,8 +20,6 @@ static uint32_t s_lastWaveTime = 0;
 static uint32_t s_lastWaveIntervalMs = 0;
 static uint32_t s_lastWavePeriodMs = 0;
 static uint32_t s_nextWaveDueMs = 0;
-static uint32_t s_nextSpawnDueMs = 0;
-static uint32_t s_lastSpawnIntervalMs = 0;
 static float s_smoothedBeatPeriodMs = 0.0f;
 
 static uint32_t s_lastBeatMs = 0;
@@ -32,7 +30,6 @@ static uint32_t s_lastPulseIntervalMs = 0;
 static uint32_t s_startupMs = 0;
 static uint32_t s_fadeStartMs = 0;
 static uint32_t s_lastSyntheticBeatMs = 0;
-static uint32_t s_beatWaveCounter = 0;
 
 static bool s_startupSnapshotTaken = false;
 static float s_startupAvgBeatMs = 500.0f;
@@ -67,8 +64,13 @@ static inline int random_int(int min_val, int max_val) {
   return min_val + (int)(esp_random() % span);
 }
 
-static float random_unit() {
-  return (float)esp_random() / (float)UINT32_MAX;
+static int32_t random_hue_drift_offset() {
+  float rounds = WAVE_HUE_DRIFT_ROUNDS;
+  if (rounds < 0.0f) rounds = -rounds;
+  if (rounds > 32.0f) rounds = 32.0f;
+  const int32_t maxOffset = (int32_t)lroundf(rounds * 65535.0f);
+  if (maxOffset <= 0) return 0;
+  return (int32_t)random_int(-maxOffset, maxOffset + 1);
 }
 
 static float beatPulseRatio(float beatPeriodMs, uint32_t nowMs, float minRatio, uint32_t lastBeatMs) {
@@ -98,25 +100,21 @@ static void applyPulseToStrip(Rgb* leds, int count, float ratio) {
 }
 
 static void getWaveRatios(float* outNose, float* outGap, float* outTail) {
-  float nose = clamp01(g_config.waveNoseRatio);
-  float gap = clamp01(g_config.waveGapRatio);
-  float tail = 1.0f - nose - gap;
-  if (tail < 0.0f) tail = 0.0f;
+  const float rawNose = clamp01(g_config.waveNoseRatio);
+  const float rawGap = clamp01(g_config.waveGapRatio);
+  // Spacing is defined by: nose + gap + nose (same nose ratio on both sides).
+  const float total = (2.0f * rawNose) + rawGap;
+  float nose = 0.5f;
+  float gap = 0.0f;
+  float tail = 0.5f;
+  if (total > 0.0001f) {
+    nose = rawNose / total;
+    gap = rawGap / total;
+    tail = rawNose / total;
+  }
   if (outNose) *outNose = nose;
   if (outGap) *outGap = gap;
   if (outTail) *outTail = tail;
-}
-
-static uint32_t computeSpawnIntervalMs(float beatPeriodMs) {
-  float intervalMs = beatPeriodMs * clampf(g_config.waveSpawnRatio, 0.1f, 5.0f);
-  if (intervalMs < 1.0f) intervalMs = 1.0f;
-  const float jitter = clampf(g_config.waveSpawnJitter, 0.0f, 1.0f);
-  if (jitter > 0.0001f) {
-    const float r = (random_unit() * 2.0f) - 1.0f; // -1..1
-    intervalMs *= (1.0f + r * jitter);
-    if (intervalMs < 1.0f) intervalMs = 1.0f;
-  }
-  return (uint32_t)lroundf(intervalMs);
 }
 
 static int8_t speedControlFromPeriod(uint32_t periodMs) {
@@ -131,12 +129,21 @@ static int8_t speedControlFromPeriod(uint32_t periodMs) {
   return (int8_t)lroundf(clampf(sc, -10.0f, 10.0f));
 }
 
+static float waveWidthSpeedNormalization() {
+  // Keep width sizing mostly independent from the global speed scalar so
+  // WAVE_SPEED_BASE changes are visually obvious in travel speed.
+  const float norm = g_config.waveSpeedBase * g_config.waveSpeedMultiplier;
+  if (norm < 0.001f) return 1.0f;
+  return norm;
+}
+
 static void applyWaveRatiosToLastWave(float beatPeriodMs) {
   if (beatPeriodMs <= 0.0f) return;
   auto& waves = getWavesMutable();
   if (waves.empty()) return;
   Wave& wave = waves.back();
-  const float spacingFrames = fabsf(wave.speed) * (beatPeriodMs / 1000.0f);
+  const float spacingFrames =
+    (fabsf(wave.speed) * (beatPeriodMs / 1000.0f)) / waveWidthSpeedNormalization();
   float noseRatio = 0.0f;
   float tailRatio = 0.0f;
   getWaveRatios(&noseRatio, nullptr, &tailRatio);
@@ -147,6 +154,7 @@ static void applyWaveRatiosToLastWave(float beatPeriodMs) {
 static void applyWaveRatiosFromSpacing() {
   auto& waves = getWavesMutable();
   if (waves.size() < 2) return;
+  const float widthNorm = waveWidthSpeedNormalization();
   float noseRatio = 0.0f;
   float tailRatio = 0.0f;
   getWaveRatios(&noseRatio, nullptr, &tailRatio);
@@ -171,7 +179,7 @@ static void applyWaveRatiosFromSpacing() {
     for (size_t i = 1; i < forward.size(); i++) {
       const int leader = forward[i];
       const int follower = forward[i - 1];
-      float spacing = waves[leader].center - waves[follower].center;
+      float spacing = (waves[leader].center - waves[follower].center) / widthNorm;
       if (spacing < 0.0f) spacing = 0.0f;
       waves[follower].noseWidth = spacing * noseRatio;
       waves[leader].tailWidth = spacing * tailRatio;
@@ -183,7 +191,7 @@ static void applyWaveRatiosFromSpacing() {
     for (size_t i = 1; i < reverse.size(); i++) {
       const int leader = reverse[i - 1];
       const int follower = reverse[i];
-      float spacing = waves[follower].center - waves[leader].center;
+      float spacing = (waves[follower].center - waves[leader].center) / widthNorm;
       if (spacing < 0.0f) spacing = 0.0f;
       waves[follower].noseWidth = spacing * noseRatio;
       waves[leader].tailWidth = spacing * tailRatio;
@@ -205,8 +213,6 @@ void animationEngineReset(uint32_t nowMs) {
   s_lastWaveIntervalMs = 0;
   s_lastWavePeriodMs = 0;
   s_nextWaveDueMs = 0;
-  s_nextSpawnDueMs = 0;
-  s_lastSpawnIntervalMs = 0;
   s_smoothedBeatPeriodMs = 0.0f;
   s_lastBeatMs = 0;
   s_lastBeatStrength = 0.7f;
@@ -218,7 +224,6 @@ void animationEngineReset(uint32_t nowMs) {
   s_fadeSnapshotTaken = false;
   s_fadeStartMs = 0;
   s_lastSyntheticBeatMs = 0;
-  s_beatWaveCounter = 0;
 }
 
 void runLedAnimation(uint32_t now) {
@@ -365,26 +370,8 @@ void runLedAnimation(uint32_t now) {
   bool spawnWaveNow = false;
 #if ENABLE_BEAT_WAVES
   if (g_config.enableBeatWaves) {
-    const uint32_t intervalMs = computeSpawnIntervalMs(beatPeriodMs);
-    if (intervalMs != s_lastSpawnIntervalMs) {
-      s_lastSpawnIntervalMs = intervalMs;
-      s_nextSpawnDueMs = (s_lastWaveTime > 0) ? (s_lastWaveTime + intervalMs) : (now + intervalMs);
-    } else if (s_nextSpawnDueMs == 0) {
-      s_nextSpawnDueMs = (s_lastWaveTime > 0) ? (s_lastWaveTime + intervalMs) : (now + intervalMs);
-    }
-
-    if (beatEvent) {
-      spawnWaveNow = true;
-      s_nextSpawnDueMs = now + intervalMs;
-    } else if ((int32_t)(now - s_nextSpawnDueMs) >= 0) {
-      spawnWaveNow = true;
-      do {
-        s_nextSpawnDueMs += intervalMs;
-      } while ((int32_t)(now - s_nextSpawnDueMs) >= 0);
-    }
-  } else {
-    s_nextSpawnDueMs = 0;
-    s_lastSpawnIntervalMs = 0;
+    // Spawn exactly once per beat event (real, synthetic, or relaxation tick).
+    spawnWaveNow = beatEvent;
   }
 #endif
 
@@ -459,29 +446,21 @@ void runLedAnimation(uint32_t now) {
 
 #if ENABLE_BEAT_WAVES
   if (g_config.enableBeatWaves && spawnWaveNow) {
-    bool sendWave = true;
-    if (beatEvent) {
-      const uint8_t everyN = (g_config.beatWaveEveryN > 0) ? g_config.beatWaveEveryN : 1;
-      s_beatWaveCounter++;
-      sendWave = (everyN <= 1) || ((s_beatWaveCounter % everyN) == 0);
+    if (getWaves().size() >= g_config.maxActiveWaves) {
+      dropOldestWave();
     }
-    if (sendWave) {
-      if (getWaves().size() >= g_config.maxActiveWaves) {
-        dropOldestWave();
-      }
-      if (getWaves().size() < g_config.maxActiveWaves) {
-        const uint32_t hue = (uint32_t)random_int(0, 65536);
-        const int32_t hueStartOffset = (int32_t)random_int(-65535, 65536);
-        const int32_t hueEndOffset = (int32_t)random_int(-65535, 65536);
-        const int8_t speedCtl = speedControlFromPeriod((uint32_t)lroundf(beatPeriodMs));
-        const bool reverse = false;
-        addWave(hue, speedCtl, 1.0f, 1.0f, reverse, hueStartOffset, hueEndOffset);
-        applyWaveRatiosToLastWave(beatPeriodMs);
-      }
+    if (getWaves().size() < g_config.maxActiveWaves) {
+      const uint32_t hue = (uint32_t)random_int(0, 65536);
+      const int32_t hueStartOffset = 0;
+      const int32_t hueEndOffset = random_hue_drift_offset();
+      const int8_t speedCtl = speedControlFromPeriod((uint32_t)lroundf(beatPeriodMs));
+      const bool reverse = false;
+      addWave(hue, speedCtl, 1.0f, 1.0f, reverse, hueStartOffset, hueEndOffset);
+      applyWaveRatiosToLastWave(beatPeriodMs);
+    }
 
-      s_lastWaveIntervalMs = (s_lastWaveTime > 0) ? (now - s_lastWaveTime) : 0;
-      s_lastWaveTime = now;
-    }
+    s_lastWaveIntervalMs = (s_lastWaveTime > 0) ? (now - s_lastWaveTime) : 0;
+    s_lastWaveTime = now;
   }
 #endif
 
@@ -498,8 +477,8 @@ void runLedAnimation(uint32_t now) {
       if (getWaves().size() < g_config.maxActiveWaves) {
         const uint32_t hue = (uint32_t)random_int(0, 65536);
         const int8_t speedCtl = speedControlFromPeriod(g_config.fallbackMs);
-        const int32_t hueStartOffset = (int32_t)random_int(-65535, 65536);
-        const int32_t hueEndOffset = (int32_t)random_int(-65535, 65536);
+        const int32_t hueStartOffset = 0;
+        const int32_t hueEndOffset = random_hue_drift_offset();
         addWave(hue, speedCtl, 1.0f, 1.0f, false, hueStartOffset, hueEndOffset);
         applyWaveRatiosToLastWave((float)g_config.fallbackMs);
       }

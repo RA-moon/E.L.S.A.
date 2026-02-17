@@ -26,9 +26,10 @@
 #endif
 
 // === SPH0645 settings ===
-#ifndef SPH0645_CHANNEL
-#define SPH0645_CHANNEL 0
-#endif
+// Reserved for future channel-select handling (currently unused).
+// #ifndef SPH0645_CHANNEL
+// #define SPH0645_CHANNEL 0
+// #endif
 #ifndef SPH0645_RAW_SHIFT
 #define SPH0645_RAW_SHIFT 8
 #endif
@@ -38,7 +39,10 @@
 #define AUDIO_SAMPLE_RATE_HZ 32000
 #endif
 #ifndef AUDIO_FFT_SAMPLES
-#define AUDIO_FFT_SAMPLES 256
+#define AUDIO_FFT_SAMPLES CONFIG_DSP_MAX_FFT_SIZE
+#endif
+#if AUDIO_FFT_SAMPLES != CONFIG_DSP_MAX_FFT_SIZE
+#error "AUDIO_FFT_SAMPLES must match CONFIG_DSP_MAX_FFT_SIZE."
 #endif
 
 static constexpr float kBassMinHz = 40.0f;

@@ -82,7 +82,7 @@ static void render_task(void* arg) {
 #endif
     const uint32_t now = now_ms();
 
-#if !TEST_SOLID_COLOR
+#if !TEST_SOLID_COLOR && !AUDIO_TASK_ENABLE
     audioSchedulerRun(now, nullptr);
 #endif
 
@@ -215,16 +215,8 @@ extern "C" void app_main(void) {
   animationEngineInit(s_brain_buf, NUM_LEDS1);
   resetWaves();
   waveformInitFalloff();
-  float waveBaseFps = 0.0f;
-#if RENDER_TARGET_FPS > 0
-  waveBaseFps = (float)RENDER_TARGET_FPS;
-#else
-  if (DELAY_MS > 0) {
-    waveBaseFps = 1000.0f / (float)DELAY_MS;
-  }
-#endif
-  if (waveBaseFps <= 0.0f) waveBaseFps = WAVE_SPEED_BASE_FPS;
-  setWaveSpeedBaseFps(waveBaseFps);
+  // Keep wave motion calibration stable regardless of render FPS target.
+  setWaveSpeedBaseFps(WAVE_SPEED_BASE_FPS);
   animationEngineReset(now_ms());
 
   normalizeConfig();
