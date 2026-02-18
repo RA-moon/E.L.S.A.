@@ -1,5 +1,7 @@
 # E.L.S.A. (ESP32-S3 LED + Audio Beat Visualizer)
 
+**E**xperimental **L**iving **S**ynthetic **A**utomaton
+
 ESP32-S3 project for driving addressable LEDs with audio-reactive animations (ESP-IDF + RMT + esp-dsp).
 
 ## Features
