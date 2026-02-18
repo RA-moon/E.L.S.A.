@@ -162,7 +162,7 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - **Wave cleanup:** waves are dropped if they produce no LED > 1 while inside the active frame range.
 - **Forward-only waves:** random reverse is removed; waves start outside the pattern with the nose leading.
 - **Configurable hue drift:** each wave starts at base hue and drifts to a random end offset controlled by `WAVE_HUE_DRIFT_ROUNDS`.
-- **Pulse tuning:** pulse min ratio and decay time are now configurable and driven by **real** beats only.
+- **Pulse tuning:** pulse min ratio and decay time are configurable and driven by beat events.
 - **FFT size reduced:** `AUDIO_FFT_SAMPLES` is now `256` for lower CPU load.
 - **Bass envelope (FFT only):** time-domain envelope is disabled by default (`BASS_ENVELOPE_TIME_DOMAIN=0`).
 - **Audio task:** audio processing runs in a dedicated FreeRTOS task (`AUDIO_TASK_ENABLE=1` in `platformio.ini` `build_flags`).
@@ -458,8 +458,8 @@ every LED after rendering, right before `strip.show()`.
 
 Behavior (relative to the `brightness` setting):
 - Base brightness starts at **70%**.
-- Once a **real beat** has been detected, base brightness is **100%**.
-- Pulse is driven **only by real beats** (fake beats do not restart the pulse).
+- Once a beat event has been detected, base brightness is **100%**.
+- Pulse is driven by beat events (real or synthetic) and resets to max on each beat.
 - `pulseLeadMs` shifts the pulse forward in time to compensate for detection latency
   (positive values advance the pulse, negative values delay it).
 - During fade-to-startup, base brightness is lerped back toward **70%** and the
@@ -471,17 +471,20 @@ Formulas (simplified):
 baseBrightnessRatio = 0.70
 pulseRatio = 1.0
 
-if (lastRealBeatMs > 0) {
+if (lastPulseBeatMs > 0) {
   baseBrightnessRatio = 1.0
-  intervalMs = (lastRealBeatIntervalMs > 0)
-               ? lastRealBeatIntervalMs
+  intervalMs = (lastPulseIntervalMs > 0)
+               ? lastPulseIntervalMs
                : smoothedBeatPeriodMs
 
   intervalMs *= beatPulseDecayRatio
-  e = 1.0 - ((pulseNow - lastRealBeatMs) / intervalMs)   // 1..0
-  if BEAT_DECAY_EASE_OUT: e = e * e
-  pulseRatio = beatPulseMinRatio + (1 - beatPulseMinRatio) * e
-  pulseRatio = clamp(pulseRatio, beatPulseMinRatio, 1.0)
+  if (beatEvent):
+    pulseRatio = 1.0
+  else:
+    e = 1.0 - ((pulseNow - lastPulseBeatMs) / intervalMs)   // 1..0
+    if BEAT_DECAY_EASE_OUT: e = e * e
+    pulseRatio = beatPulseMinRatio + (1 - beatPulseMinRatio) * e
+    pulseRatio = clamp(pulseRatio, beatPulseMinRatio, 1.0)
 }
 
 frameBrightness = g_config.brightness * baseBrightnessRatio

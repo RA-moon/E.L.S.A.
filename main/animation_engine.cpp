@@ -231,8 +231,8 @@ void runLedAnimation(uint32_t now) {
       (s_lastBeatIntervalMs > 0) ? (float)s_lastBeatIntervalMs : s_startupAvgBeatMs;
   }
 
-#if ENABLE_BEAT_WAVES
   bool beatEvent = false;
+#if ENABLE_BEAT_WAVES
   const uint32_t lastRealBeatBefore = getLastRealBeatMs();
   float beatStrength = 0.0f;
   const bool beatConsumed = consumeBeat(&beatStrength);
@@ -253,10 +253,6 @@ void runLedAnimation(uint32_t now) {
     s_lastBeatStrength = beatStrength;
     if (beatIsReal) {
       s_lastSyntheticBeatMs = 0;
-      if (s_lastPulseBeatMs > 0) {
-        s_lastPulseIntervalMs = now - s_lastPulseBeatMs;
-      }
-      s_lastPulseBeatMs = now;
     }
   } else if (!beatConsumed && inFakeWindow) {
     uint32_t intervalMs = s_lastBeatIntervalMs;
@@ -275,6 +271,13 @@ void runLedAnimation(uint32_t now) {
     }
   }
 #endif
+
+  if (beatEvent) {
+    if (s_lastPulseBeatMs > 0) {
+      s_lastPulseIntervalMs = now - s_lastPulseBeatMs;
+    }
+    s_lastPulseBeatMs = now;
+  }
 
   float fadeToStartup = 0.0f;
 #if ENABLE_FADE_TO_STARTUP
@@ -383,7 +386,11 @@ void runLedAnimation(uint32_t now) {
     if (pulseNow < 0) pulseNow = 0;
     if (pulseNow > 0xFFFFFFFFLL) pulseNow = 0xFFFFFFFFLL;
     const float minRatio = clampf(g_config.beatPulseMinRatio, 0.0f, 1.0f);
-    pulseRatio = beatPulseRatio(intervalMs, (uint32_t)pulseNow, minRatio, s_lastPulseBeatMs);
+    if (beatEvent) {
+      pulseRatio = kBrightnessMaxRatio;
+    } else {
+      pulseRatio = beatPulseRatio(intervalMs, (uint32_t)pulseNow, minRatio, s_lastPulseBeatMs);
+    }
   }
 
   if (fadeToStartup > 0.0f) {
