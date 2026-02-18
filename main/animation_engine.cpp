@@ -102,16 +102,18 @@ static void applyPulseToStrip(Rgb* leds, int count, float ratio) {
 static void getWaveRatios(float* outNose, float* outGap, float* outTail) {
   const float rawNose = clamp01(g_config.waveNoseRatio);
   const float rawGap = clamp01(g_config.waveGapRatio);
-  // Spacing is defined by: nose + gap + nose (same nose ratio on both sides).
-  const float total = (2.0f * rawNose) + rawGap;
-  float nose = 0.5f;
-  float gap = 0.0f;
-  float tail = 0.5f;
-  if (total > 0.0001f) {
-    nose = rawNose / total;
-    gap = rawGap / total;
-    tail = rawNose / total;
+  // Direct split: nose + gap + tail = 1.
+  // If nose+gap exceeds 1, scale them down proportionally and leave tail at 0.
+  float nose = rawNose;
+  float gap = rawGap;
+  const float used = nose + gap;
+  if (used > 1.0f) {
+    const float inv = 1.0f / used;
+    nose *= inv;
+    gap *= inv;
   }
+  float tail = 1.0f - (nose + gap);
+  if (tail < 0.0f) tail = 0.0f;
   if (outNose) *outNose = nose;
   if (outGap) *outGap = gap;
   if (outTail) *outTail = tail;
@@ -129,21 +131,12 @@ static int8_t speedControlFromPeriod(uint32_t periodMs) {
   return (int8_t)lroundf(clampf(sc, -10.0f, 10.0f));
 }
 
-static float waveWidthSpeedNormalization() {
-  // Keep width sizing mostly independent from the global speed scalar so
-  // WAVE_SPEED_BASE changes are visually obvious in travel speed.
-  const float norm = g_config.waveSpeedBase * g_config.waveSpeedMultiplier;
-  if (norm < 0.001f) return 1.0f;
-  return norm;
-}
-
 static void applyWaveRatiosToLastWave(float beatPeriodMs) {
   if (beatPeriodMs <= 0.0f) return;
   auto& waves = getWavesMutable();
   if (waves.empty()) return;
   Wave& wave = waves.back();
-  const float spacingFrames =
-    (fabsf(wave.speed) * (beatPeriodMs / 1000.0f)) / waveWidthSpeedNormalization();
+  const float spacingFrames = fabsf(wave.speed) * (beatPeriodMs / 1000.0f);
   float noseRatio = 0.0f;
   float tailRatio = 0.0f;
   getWaveRatios(&noseRatio, nullptr, &tailRatio);
@@ -154,7 +147,6 @@ static void applyWaveRatiosToLastWave(float beatPeriodMs) {
 static void applyWaveRatiosFromSpacing() {
   auto& waves = getWavesMutable();
   if (waves.size() < 2) return;
-  const float widthNorm = waveWidthSpeedNormalization();
   float noseRatio = 0.0f;
   float tailRatio = 0.0f;
   getWaveRatios(&noseRatio, nullptr, &tailRatio);
@@ -179,7 +171,7 @@ static void applyWaveRatiosFromSpacing() {
     for (size_t i = 1; i < forward.size(); i++) {
       const int leader = forward[i];
       const int follower = forward[i - 1];
-      float spacing = (waves[leader].center - waves[follower].center) / widthNorm;
+      float spacing = waves[leader].center - waves[follower].center;
       if (spacing < 0.0f) spacing = 0.0f;
       waves[follower].noseWidth = spacing * noseRatio;
       waves[leader].tailWidth = spacing * tailRatio;
@@ -191,7 +183,7 @@ static void applyWaveRatiosFromSpacing() {
     for (size_t i = 1; i < reverse.size(); i++) {
       const int leader = reverse[i - 1];
       const int follower = reverse[i];
-      float spacing = (waves[follower].center - waves[leader].center) / widthNorm;
+      float spacing = waves[follower].center - waves[leader].center;
       if (spacing < 0.0f) spacing = 0.0f;
       waves[follower].noseWidth = spacing * noseRatio;
       waves[leader].tailWidth = spacing * tailRatio;
@@ -235,7 +227,8 @@ void runLedAnimation(uint32_t now) {
     s_startupSnapshotTaken = true;
     s_startupAvgBeatMs = getAverageBeatIntervalMs();
     s_startupBeatStrength = s_lastBeatStrength;
-    s_startupLastBeatIntervalMs = (float)s_lastBeatIntervalMs;
+    s_startupLastBeatIntervalMs =
+      (s_lastBeatIntervalMs > 0) ? (float)s_lastBeatIntervalMs : s_startupAvgBeatMs;
   }
 
 #if ENABLE_BEAT_WAVES
@@ -317,11 +310,14 @@ void runLedAnimation(uint32_t now) {
     if (!s_fadeSnapshotTaken) {
       s_fadeSnapshotTaken = true;
       s_fadeFromAvgBeatMs = beatPeriodMs;
-      s_fadeFromLastBeatIntervalMs = lastBeatIntervalMsRaw;
+      s_fadeFromLastBeatIntervalMs =
+        (lastBeatIntervalMsRaw > 0.0f) ? lastBeatIntervalMsRaw : beatPeriodMs;
       s_fadeFromBeatStrength = beatStrengthForWave;
     }
     beatPeriodMs = lerpf(s_fadeFromAvgBeatMs, s_startupAvgBeatMs, fadeToStartup);
-    lastBeatIntervalMsF = lerpf(s_fadeFromLastBeatIntervalMs, s_startupLastBeatIntervalMs, fadeToStartup);
+    const float startupIntervalTargetMs =
+      (s_startupLastBeatIntervalMs > 0.0f) ? s_startupLastBeatIntervalMs : s_startupAvgBeatMs;
+    lastBeatIntervalMsF = lerpf(s_fadeFromLastBeatIntervalMs, startupIntervalTargetMs, fadeToStartup);
     beatStrengthForWave = lerpf(s_fadeFromBeatStrength, s_startupBeatStrength, fadeToStartup);
   } else {
     s_fadeSnapshotTaken = false;

@@ -98,7 +98,7 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - `AUDIO_INTERVAL` (audio task period)
 - `MAX_ACTIVE_WAVES`
 - `WAVE_SPACING_INTERVAL_MS`
-- `WAVE_NOSE_RATIO`, `WAVE_GAP_RATIO` (spacing normalized from `nose + gap + nose`)
+- `WAVE_NOSE_RATIO`, `WAVE_GAP_RATIO` (direct split: `nose`, `gap`, `tail = 1 - (nose + gap)`)
 - `WAVE_SPEED_BASE`, `WAVE_SPEED_RANGE`, `WAVE_SPEED_MULTIPLIER`, `WAVE_SPEED_BASE_FPS`
 - `WAVE_FALLOFF_NOSE_P1`, `WAVE_FALLOFF_NOSE_P2`
 - `WAVE_FALLOFF_TAIL_P1`, `WAVE_FALLOFF_TAIL_P2`
@@ -348,14 +348,13 @@ multiplier mapping above, then scaled by a base FPS of `WAVE_SPEED_BASE_FPS`
 **Where:** `main/animation_engine.cpp`
 
 Wave width is derived from the **spacing between wave peaks**. That spacing is
-split from `nose + gap + nose` (same nose ratio on both sides):
+split directly into nose/gap/tail:
 
 ```
 spacing = distance between wave centers
-total = 2 * WAVE_NOSE_RATIO + WAVE_GAP_RATIO
-nose = spacing * (WAVE_NOSE_RATIO / total)
-gap  = spacing * (WAVE_GAP_RATIO / total)
-tail = spacing * (WAVE_NOSE_RATIO / total)
+nose = spacing * WAVE_NOSE_RATIO
+gap  = spacing * WAVE_GAP_RATIO
+tail = spacing * (1 - (WAVE_NOSE_RATIO + WAVE_GAP_RATIO))
 ```
 
 The `nose` is the *leading* side and `tail` is the *trailing* side of the wave
@@ -365,13 +364,13 @@ negative.
 **Visual example (`WAVE_NOSE_RATIO=0.2`, `WAVE_GAP_RATIO=0.2`):**
 ```
 peak A  |<--------- spacing between peaks --------->|  peak B
-        [ tail 33% ][ gap 33% ][ nose 33% ]
+        [ tail 60% ][ gap 20% ][ nose 20% ]
 ```
 
 At spawn time, the spacing is estimated from the effective beat period:
 
 ```
-spacing = (|speed| * (beatPeriodMs / 1000)) / (waveSpeedBase * waveSpeedMultiplier)
+spacing = |speed| * (beatPeriodMs / 1000)
 ```
 
 When multiple waves are active, spacing updates recompute **nose** and **tail**
@@ -517,9 +516,8 @@ Spacing updates run on changes or every `WAVE_SPACING_INTERVAL_MS`. The engine
 measures **actual distance between adjacent wave centers** and recomputes:
 
 ```
-total = 2 * WAVE_NOSE_RATIO + WAVE_GAP_RATIO
-nose = spacing * (WAVE_NOSE_RATIO / total)
-tail = spacing * (WAVE_NOSE_RATIO / total)
+nose = spacing * WAVE_NOSE_RATIO
+tail = spacing * (1 - (WAVE_NOSE_RATIO + WAVE_GAP_RATIO))
 ```
 
 This keeps the nose/gap/tail proportions stable regardless of wave speed.

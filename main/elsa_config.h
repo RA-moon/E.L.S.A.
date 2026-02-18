@@ -71,13 +71,15 @@
 #define MAX_ACTIVE_WAVES          20
 // Spacing recalculation throttle (ms). Lower = more accurate spacing, more CPU.
 #define WAVE_SPACING_INTERVAL_MS  60
-// Ratios of spacing between wave peaks, normalized from:
-//   nose + gap + nose
-// (same nose ratio is used on both sides of the gap).
-#define WAVE_NOSE_RATIO           0.20f  // fraction of spacing used for nose
-#define WAVE_GAP_RATIO            0.20f  // fraction of spacing left dark (gap)
+// Direct fractions of spacing between wave peaks:
+//   nose = WAVE_NOSE_RATIO (leading side)
+//   gap  = WAVE_GAP_RATIO  (dark region)
+//   tail = 1 - (nose + gap) (trailing side)
+// If nose+gap > 1.0, both are scaled down proportionally (tail becomes 0).
+#define WAVE_NOSE_RATIO           0.20f
+#define WAVE_GAP_RATIO            0.20f
 // Default wave speed scalar (1.0 = current baseline travel speed).
-#define WAVE_SPEED_BASE           1.0f
+#define WAVE_SPEED_BASE           1.5f
 // Speed variation amount (0..1):
 //   0.0 => no variation
 //   1.0 => 0.5x..2.0x around WAVE_SPEED_BASE
