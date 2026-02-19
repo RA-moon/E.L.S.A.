@@ -12,7 +12,6 @@ int renderInterpolatedFrame(
   float widthBehind,
   float widthAhead,
   int brightness,
-  bool reverse,
   Rgb* leds,
   int ledCount
 );

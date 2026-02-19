@@ -10,7 +10,6 @@ int renderInterpolatedFrame(
   float widthBehind,
   float widthAhead,
   int brightness,
-  bool reverse,
   Rgb* leds,
   int ledCount
 ) {
@@ -19,15 +18,12 @@ int renderInterpolatedFrame(
 
   for (int i = 0; i < totalRings; i++) {
     const int waveFrameIndex = i;
-    const int brightnessFrameIndex = reverse ? (totalRings - 1 - i) : i;
-
-    const float actualTail = reverse ? widthAhead : widthBehind;
-    const float actualNose = reverse ? widthBehind : widthAhead;
+    const int brightnessFrameIndex = i;
 
     const float intensity = getAsymmetricIntensity((float)brightnessFrameIndex,
                                                    waveCenter,
-                                                   actualTail,
-                                                   actualNose);
+                                                   widthBehind,
+                                                   widthAhead);
     if (intensity < 0.005f) continue;
 
     int v = (int)lroundf((float)brightness * intensity);

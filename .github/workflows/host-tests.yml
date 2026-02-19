@@ -1,0 +1,15 @@
+name: Host Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host scheduler tests
+        run: ./scripts/run_host_tests.sh

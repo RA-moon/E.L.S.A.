@@ -58,6 +58,9 @@ static uint64_t s_renderWindowStartUs = 0;
 static uint32_t s_renderFpsFrames = 0;
 static uint64_t s_renderFpsWindowStartUs = 0;
 #endif
+#if SCHED_TELEMETRY_LOG_MS > 0
+static uint64_t s_schedTelemetryWindowStartUs = 0;
+#endif
 
 static void showStrips() {
   led_strip_device_show_async(&s_brain);
@@ -151,6 +154,23 @@ static void render_task(void* arg) {
       s_renderFpsWindowStartUs = nowUs;
     }
 #endif
+#if SCHED_TELEMETRY_LOG_MS > 0
+    const uint64_t telemetryNowUs = esp_timer_get_time();
+    if (s_schedTelemetryWindowStartUs == 0) s_schedTelemetryWindowStartUs = telemetryNowUs;
+    const uint64_t telemetryWindowUs = telemetryNowUs - s_schedTelemetryWindowStartUs;
+    if (telemetryWindowUs >= (uint64_t)SCHED_TELEMETRY_LOG_MS * 1000ULL) {
+      AnimationSchedulerTelemetry sched = {};
+      getAnimationSchedulerTelemetry(&sched);
+      const uint32_t sinceSpawnMs =
+        (sched.lastSpawnMs > 0 && now >= sched.lastSpawnMs) ? (now - sched.lastSpawnMs) : 0;
+      ESP_LOGI(TAG,
+               "sched spawn=%s since=%ums fallback=%ums",
+               waveSpawnReasonName(sched.lastSpawnReason),
+               (unsigned)sinceSpawnMs,
+               (unsigned)sched.lastFallbackIntervalMs);
+      s_schedTelemetryWindowStartUs = telemetryNowUs;
+    }
+#endif
 #if RENDER_TARGET_FPS > 0
     nextFrameUs += framePeriodUs;
     const int64_t nowFrameUs = now_us();
@@ -168,7 +188,14 @@ static void render_task(void* arg) {
     if (windowUs >= (uint64_t)PROFILE_INTERVAL_MS * 1000ULL) {
       const float duty = (windowUs > 0) ? (100.0f * (float)s_renderBusyUs / (float)windowUs) : 0.0f;
       const float fps = (windowUs > 0) ? (1e6f * (float)s_renderFrames / (float)windowUs) : 0.0f;
-      ESP_LOGI(TAG, "render duty=%.1f%% fps=%.1f", duty, fps);
+      AnimationSchedulerTelemetry sched = {};
+      getAnimationSchedulerTelemetry(&sched);
+      ESP_LOGI(TAG,
+               "render duty=%.1f%% fps=%.1f spawn=%s fallback=%ums",
+               duty,
+               fps,
+               waveSpawnReasonName(sched.lastSpawnReason),
+               (unsigned)sched.lastFallbackIntervalMs);
       s_renderBusyUs = 0;
       s_renderFrames = 0;
       s_renderWindowStartUs = frameEndUs;

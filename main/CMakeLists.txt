@@ -2,6 +2,8 @@ idf_component_register(
   SRCS
     "main.cpp"
     "animation_engine.cpp"
+    "animation_config_table.cpp"
+    "beat_scheduler_policy.cpp"
     "animation_manager.cpp"
     "frame_interpolation.cpp"
     "hair_strip.cpp"

@@ -79,8 +79,9 @@ See `docs/architecture.md`.
 Shared defaults live in `main/audio_processor.cpp`:
 ```c
 #define AUDIO_SAMPLE_RATE_HZ 32000
-#define AUDIO_FFT_SAMPLES 256
+#define AUDIO_FFT_SAMPLES CONFIG_DSP_MAX_FFT_SIZE
 ```
+`AUDIO_FFT_SAMPLES` must match `CONFIG_DSP_MAX_FFT_SIZE` (build-time check).
 Override with `-DAUDIO_SAMPLE_RATE_HZ=...` / `-DAUDIO_FFT_SAMPLES=...` in `platformio.ini`.
 
 ## Tunable Settings
@@ -108,7 +109,7 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - `BPM_SWITCH_THRESHOLD`, `BPM_SWITCH_WINDOW_MS`, `AUTO_SWITCH_INTERVAL_MS`
 
 **Pulse + Beat Response (`main/elsa_config.h`)**
-- `BEAT_PULSE_MIN_RATIO`, `BEAT_PULSE_DECAY_RATIO`
+- `BEAT_PULSE_MIN_RATIO`, `BEAT_WIDTH_MIN_RATIO`, `BEAT_PULSE_DECAY_RATIO`
 - `BEAT_DECAY_MIN_MS`, `BEAT_DECAY_MAX_MS`, `BEAT_DECAY_EASE_OUT`, `BEAT_PERIOD_EMA_ALPHA`
 - `FADE_TO_STARTUP_IDLE_MS`, `FADE_TO_STARTUP_DURATION_MS`
 - `ENABLE_BEAT_WAVES`, `ENABLE_FALLBACK_WAVES`, `NO_BEAT_FALLBACK_MS`
@@ -130,11 +131,33 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - `brightness` (runtime, seeded by `BRIGHTNESS1`)
 - `energyEmaAlpha`, `fluxEmaAlpha`, `fluxThreshold`, `fluxRiseFactor`
 - `minBeatIntervalMs`, `avgBeatMinMs`, `avgBeatMaxMs`
+- Runtime clamps: `minBeatIntervalMs` 80..1000, `avgBeatMinMs`/`avgBeatMaxMs` 120..3000, `fallbackMs` 1..10000
+
+**Animation Config Table (`main/animation_config_table.h`, `main/animation_config_table.cpp`)**
+- Phase table buckets:
+  - `beatDetected`
+  - `waitFadeStart` / `waitFadeEnd`
+  - `fadeStart` / `fadeEnd`
+  - `defaults`
+- Table fields (all are relative scales):
+  - `waveTriggerBeatScale`, `waveTriggerFallbackScale`
+  - `brightnessPulseScale`
+  - `noseWidthScale`, `tailWidthScale`
+  - `waveTailRatioScale`, `waveNoseRatioScale`
+  - `waveSpeedBaseScale`, `waveSpeedRangeScale`
+  - `waveHueDriftRoundsScale`
+- Scale semantics:
+  - `1.0` = full effect from runtime config
+  - `0.0` = effect disabled in that phase
+  - `0.5` = half effect
+  - For trigger scales, fractional values reduce wave spawn rate proportionally
+    (for example `0.5` spawns about every second eligible trigger event).
+- Fallback behavior: if a field is unset (`hasValue=false`), scale defaults to `1.0`.
 
 **Tasks / Performance (`main/elsa_config.h`)**
 - `AUDIO_TASK_ENABLE`, `AUDIO_TASK_PRIORITY`, `AUDIO_TASK_CORE`
 - `RENDER_TASK_PRIORITY`, `RENDER_TASK_CORE`
-- `PROFILE_PERF`, `PROFILE_INTERVAL_MS`
+- `PROFILE_PERF`, `PROFILE_INTERVAL_MS`, `SCHED_TELEMETRY_LOG_MS`
 
 **Buttons / Debug (`main/elsa_config.h`)**
 - `TEST_SOLID_COLOR`, `TEST_LED_COUNT`
@@ -163,9 +186,18 @@ Most values are compile-time defines in `main/elsa_config.h` (override with `-D.
 - **Forward-only waves:** random reverse is removed; waves start outside the pattern with the nose leading.
 - **Configurable hue drift:** each wave starts at base hue and drifts to a random end offset controlled by `WAVE_HUE_DRIFT_ROUNDS`.
 - **Pulse tuning:** pulse min ratio and decay time are configurable and driven by beat events.
-- **FFT size reduced:** `AUDIO_FFT_SAMPLES` is now `256` for lower CPU load.
-- **Bass envelope (FFT only):** time-domain envelope is disabled by default (`BASS_ENVELOPE_TIME_DOMAIN=0`).
+- **Wave width pulse tuning:** nose/tail width now decays between beats and clamps by `BEAT_WIDTH_MIN_RATIO`.
+- **FFT size sync:** `AUDIO_FFT_SAMPLES` is tied to `CONFIG_DSP_MAX_FFT_SIZE` (build-time checked).
 - **Audio task:** audio processing runs in a dedicated FreeRTOS task (`AUDIO_TASK_ENABLE=1` in `platformio.ini` `build_flags`).
+- **Cross-core safety:** average beat interval, detector config, and audio telemetry are read/written via synchronized snapshots to avoid racey state reads between audio/render tasks.
+- **Scheduler telemetry:** animation exposes `lastSpawnReason` and `lastFallbackIntervalMs` for runtime diagnostics and logs them via `SCHED_TELEMETRY_LOG_MS` (independent of `PROFILE_PERF`).
+
+## Host Tests
+- Run all: `./scripts/run_host_tests.sh`
+- Fallback policy test: `./scripts/run_no_beat_policy_test.sh`
+- Beat event-flow test: `./scripts/run_beat_event_flow_test.sh`
+- Scheduler integration test: `./scripts/run_beat_scheduler_integration_test.sh`
+- Tests validate shared scheduler policy logic and fake-window -> relax -> fallback interaction in `main/beat_scheduler_policy.cpp`.
 
 ## How It Works (Detailed)
 
@@ -225,6 +257,9 @@ ratio = flux / (fluxEma + 1e-3)
 strength = clamp01((ratio - fluxThreshold) / fluxThreshold)
 ```
 
+Beat handoff from audio to animation is event-based and atomic:
+`{strength, timestampMs, isReal}` is published per beat and consumed once.
+
 If I2S init fails, a lightweight fake beat generator feeds the animation engine
 during the initial **fake-beat window** (`FADE_TO_STARTUP_IDLE_MS` after the last
 real beat). After that, relaxation ticks keep waves moving.
@@ -267,7 +302,12 @@ a synthetic beat is emitted every `intervalMs` (derived from the last or average
 **Relaxation ticks (after fake-beat window)**  
 Once fade-to-startup begins, a periodic tick fires every `beatPeriodMs` to
 continue emitting waves even without beat detections and update the synthetic beat interval.
+The relaxation period is captured when the mode starts, then kept fixed until
+real beats resume (or fade mode exits), which prevents cadence drift.
 Fade completes after `FADE_TO_STARTUP_DURATION_MS` (20s by default).
+Because relax ticks keep refreshing `lastWaveTime`, fallback usually remains
+suppressed in this phase unless relax cadence stops/slows enough to exceed the
+fallback quiet interval.
 
 **Wave cadence**
 
@@ -281,17 +321,32 @@ if beatEvent:
 
 When spawning, the engine respects `maxActiveWaves` and drops the oldest wave if needed.
 
-### Fallback Waves (No Beat Waves)
+**Phase mapping for table-driven overrides**
+- `beatDetected`: a beat event was emitted this frame (real/fake/relax).
+- `waitFadeStart` -> `waitFadeEnd`: no beat event, still inside fake-beat window before fade starts (`idle / FADE_TO_STARTUP_IDLE_MS`).
+- `fadeStart` -> `fadeEnd`: fade-to-startup is active (`fadeToStartup` from 0..1).
+- `defaults`: applied first as base override layer for all phases.
+
+### Fallback Waves
 **Where:** `main/animation_engine.cpp`
 
-If beat-driven waves are disabled but fallback is enabled:
+Fallback waves are enabled whenever `enableFallbackWaves=1`:
 
 ```
-if !enableBeatWaves && enableFallbackWaves
-  and (now - lastBeatMs >= fallbackMs)
-  and (now - lastWaveTime >= fallbackMs):
-    spawn wave with strength = 0
+if !enableBeatWaves:
+  // fixed fallback cadence
+  trigger after fallbackMs (minimum 1 ms) of beat quiet + wave quiet
+
+if enableBeatWaves:
+  // overdue real-beat guard with fuzzy window
+  expectedMs = clamp(getAverageBeatIntervalMs(), avgBeatMinMs, avgBeatMaxMs)
+  fallbackIntervalMs = expectedMs * 1.2
+  trigger if:
+    (now - lastRealBeatMs >= fallbackIntervalMs)
+    and (now - lastWaveTime >= fallbackIntervalMs)
 ```
+
+If no real beat has been seen yet, beat-wave mode uses `fallbackMs` as a bootstrap delay.
 
 ### Wave Speed
 **Where:** `main/animation_engine.cpp`, `main/wave_position.cpp`
@@ -460,6 +515,8 @@ Behavior (relative to the `brightness` setting):
 - Base brightness starts at **70%**.
 - Once a beat event has been detected, base brightness is **100%**.
 - Pulse is driven by beat events (real or synthetic) and resets to max on each beat.
+- Wave nose/tail width uses the same beat timing envelope and decays toward
+  `BEAT_WIDTH_MIN_RATIO` between beat events.
 - `pulseLeadMs` shifts the pulse forward in time to compensate for detection latency
   (positive values advance the pulse, negative values delay it).
 - During fade-to-startup, base brightness is lerped back toward **70%** and the
@@ -470,6 +527,7 @@ Formulas (simplified):
 ```
 baseBrightnessRatio = 0.70
 pulseRatio = 1.0
+widthPulseRatio = 1.0
 
 if (lastPulseBeatMs > 0) {
   baseBrightnessRatio = 1.0
@@ -480,15 +538,20 @@ if (lastPulseBeatMs > 0) {
   intervalMs *= beatPulseDecayRatio
   if (beatEvent):
     pulseRatio = 1.0
+    widthPulseRatio = 1.0
   else:
     e = 1.0 - ((pulseNow - lastPulseBeatMs) / intervalMs)   // 1..0
     if BEAT_DECAY_EASE_OUT: e = e * e
     pulseRatio = beatPulseMinRatio + (1 - beatPulseMinRatio) * e
     pulseRatio = clamp(pulseRatio, beatPulseMinRatio, 1.0)
+    widthPulseRatio = beatWidthMinRatio + (1 - beatWidthMinRatio) * e
+    widthPulseRatio = clamp(widthPulseRatio, beatWidthMinRatio, 1.0)
 }
 
 frameBrightness = g_config.brightness * baseBrightnessRatio
 rgb = rgb * pulseRatio
+waveTailWidth = waveTailWidth * widthPulseRatio
+waveNoseWidth = waveNoseWidth * widthPulseRatio
 ```
 
 ---
@@ -505,7 +568,7 @@ if autoMode and bpm > 0 and (now - bpmWindowStart) >= BPM_SWITCH_WINDOW_MS:
     switch to random next animation
 ```
 
-If BPM is unavailable, a fixed time-based fallback is used:
+Auto mode also enforces a max switch interval, regardless of BPM:
 
 ```
 if autoMode and (now - lastSwitchTime) >= AUTO_SWITCH_INTERVAL_MS:
@@ -540,9 +603,3 @@ center > maxIndex + noseWidth + 1
 Additionally, a wave is removed if it produces **no LED > 1** while its center
 is inside the active frame range (0..maxIndex). This avoids waves lingering
 with no visible contribution.
-
----
-
-- **Auto-mode BPM switching:** in auto mode, animation switches when BPM changes by
-  at least `BPM_SWITCH_THRESHOLD` over `BPM_SWITCH_WINDOW_MS`; otherwise it falls
-  back to `AUTO_SWITCH_INTERVAL_MS`.

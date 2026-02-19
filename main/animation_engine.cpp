@@ -5,7 +5,9 @@
 #include <vector>
 
 #include "animation_manager.h"
+#include "animation_config_table.h"
 #include "audio_processor.h"
+#include "beat_scheduler_policy.h"
 #include "elsa_config.h"
 #include "frame_interpolation.h"
 #include "runtime_config.h"
@@ -17,30 +19,33 @@ static Rgb* s_leds = nullptr;
 static uint16_t s_ledCount = 0;
 
 static uint32_t s_lastWaveTime = 0;
-static uint32_t s_lastWaveIntervalMs = 0;
 static uint32_t s_lastWavePeriodMs = 0;
 static uint32_t s_nextWaveDueMs = 0;
 static float s_smoothedBeatPeriodMs = 0.0f;
 
 static uint32_t s_lastBeatMs = 0;
-static float s_lastBeatStrength = 0.7f;
 static uint32_t s_lastBeatIntervalMs = 0;
 static uint32_t s_lastPulseBeatMs = 0;
 static uint32_t s_lastPulseIntervalMs = 0;
 static uint32_t s_startupMs = 0;
-static uint32_t s_fadeStartMs = 0;
 static uint32_t s_lastSyntheticBeatMs = 0;
+static float s_beatTriggerAccumulator = 0.0f;
+static float s_fallbackTriggerAccumulator = 0.0f;
 
 static bool s_startupSnapshotTaken = false;
 static float s_startupAvgBeatMs = 500.0f;
-static float s_startupBeatStrength = 0.7f;
 static float s_startupLastBeatIntervalMs = 0.0f;
 static bool s_fadeSnapshotTaken = false;
 static float s_fadeFromAvgBeatMs = 500.0f;
-static float s_fadeFromBeatStrength = 0.7f;
 static float s_fadeFromLastBeatIntervalMs = 0.0f;
+static AnimationSchedulerTelemetry s_schedulerTelemetry = {
+  0,
+  0,
+  WaveSpawnReason::None,
+};
 
 static constexpr float kBrightnessMaxRatio = 1.00f;
+static constexpr float kFallbackBeatOverdueRatio = 1.20f;
 
 static inline float clampf(float v, float lo, float hi) {
   if (v < lo) return lo;
@@ -64,8 +69,7 @@ static inline int random_int(int min_val, int max_val) {
   return min_val + (int)(esp_random() % span);
 }
 
-static int32_t random_hue_drift_offset() {
-  float rounds = WAVE_HUE_DRIFT_ROUNDS;
+static int32_t random_hue_drift_offset(float rounds) {
   if (rounds < 0.0f) rounds = -rounds;
   if (rounds > 32.0f) rounds = 32.0f;
   const int32_t maxOffset = (int32_t)lroundf(rounds * 65535.0f);
@@ -87,6 +91,21 @@ static float beatPulseRatio(float beatPeriodMs, uint32_t nowMs, float minRatio, 
   return clampf(ratio, minRatio, kBrightnessMaxRatio);
 }
 
+// Converts a trigger scale [0..1] to deterministic fractional triggering.
+// 1.0 triggers every event, 0.5 every second event on average, 0.0 never.
+static bool consumeScaledTrigger(bool eventNow, float scale, float* accumulator) {
+  if (!eventNow || !accumulator) return false;
+  scale = clamp01(scale);
+  if (scale <= 0.0f) return false;
+  if (scale >= 1.0f) return true;
+  *accumulator += scale;
+  if (*accumulator >= 1.0f) {
+    *accumulator -= 1.0f;
+    return true;
+  }
+  return false;
+}
+
 static void applyPulseToStrip(Rgb* leds, int count, float ratio) {
   if (!leds || count == 0) return;
   if (ratio >= 0.999f) return;
@@ -99,21 +118,17 @@ static void applyPulseToStrip(Rgb* leds, int count, float ratio) {
   scale_rgb(leds, count, (uint8_t)scale);
 }
 
-static void getWaveRatios(float* outNose, float* outGap, float* outTail) {
-  const float rawNose = clamp01(g_config.waveNoseRatio);
-  const float rawGap = clamp01(g_config.waveGapRatio);
-  // Direct split: nose + gap + tail = 1.
-  // If nose+gap exceeds 1, scale them down proportionally and leave tail at 0.
-  float nose = rawNose;
-  float gap = rawGap;
-  const float used = nose + gap;
+static void getWaveRatios(float noseRatio, float tailRatio, float* outNose, float* outGap, float* outTail) {
+  float nose = clamp01(noseRatio);
+  float tail = clamp01(tailRatio);
+  const float used = nose + tail;
   if (used > 1.0f) {
     const float inv = 1.0f / used;
     nose *= inv;
-    gap *= inv;
+    tail *= inv;
   }
-  float tail = 1.0f - (nose + gap);
-  if (tail < 0.0f) tail = 0.0f;
+  float gap = 1.0f - (nose + tail);
+  if (gap < 0.0f) gap = 0.0f;
   if (outNose) *outNose = nose;
   if (outGap) *outGap = gap;
   if (outTail) *outTail = tail;
@@ -131,33 +146,30 @@ static int8_t speedControlFromPeriod(uint32_t periodMs) {
   return (int8_t)lroundf(clampf(sc, -10.0f, 10.0f));
 }
 
-static void applyWaveRatiosToLastWave(float beatPeriodMs) {
+static void applyWaveRatiosToLastWave(float beatPeriodMs, float noseRatio, float tailRatio) {
   if (beatPeriodMs <= 0.0f) return;
   auto& waves = getWavesMutable();
   if (waves.empty()) return;
   Wave& wave = waves.back();
   const float spacingFrames = fabsf(wave.speed) * (beatPeriodMs / 1000.0f);
-  float noseRatio = 0.0f;
-  float tailRatio = 0.0f;
-  getWaveRatios(&noseRatio, nullptr, &tailRatio);
-  wave.noseWidth = spacingFrames * noseRatio;
-  wave.tailWidth = spacingFrames * tailRatio;
+  float noseRatioResolved = 0.0f;
+  float tailRatioResolved = 0.0f;
+  getWaveRatios(noseRatio, tailRatio, &noseRatioResolved, nullptr, &tailRatioResolved);
+  wave.noseWidth = spacingFrames * noseRatioResolved;
+  wave.tailWidth = spacingFrames * tailRatioResolved;
 }
 
-static void applyWaveRatiosFromSpacing() {
+static void applyWaveRatiosFromSpacing(float noseRatio, float tailRatio) {
   auto& waves = getWavesMutable();
   if (waves.size() < 2) return;
-  float noseRatio = 0.0f;
-  float tailRatio = 0.0f;
-  getWaveRatios(&noseRatio, nullptr, &tailRatio);
+  float noseRatioResolved = 0.0f;
+  float tailRatioResolved = 0.0f;
+  getWaveRatios(noseRatio, tailRatio, &noseRatioResolved, nullptr, &tailRatioResolved);
 
-  std::vector<int> forward;
-  std::vector<int> reverse;
-  forward.reserve(waves.size());
-  reverse.reserve(waves.size());
+  std::vector<int> ordered;
+  ordered.reserve(waves.size());
   for (size_t i = 0; i < waves.size(); i++) {
-    if (waves[i].reverse) reverse.push_back((int)i);
-    else forward.push_back((int)i);
+    ordered.push_back((int)i);
   }
 
   auto sortByCenter = [&](std::vector<int>& idx) {
@@ -166,27 +178,15 @@ static void applyWaveRatiosFromSpacing() {
     });
   };
 
-  if (forward.size() >= 2) {
-    sortByCenter(forward);
-    for (size_t i = 1; i < forward.size(); i++) {
-      const int leader = forward[i];
-      const int follower = forward[i - 1];
+  if (ordered.size() >= 2) {
+    sortByCenter(ordered);
+    for (size_t i = 1; i < ordered.size(); i++) {
+      const int leader = ordered[i];
+      const int follower = ordered[i - 1];
       float spacing = waves[leader].center - waves[follower].center;
       if (spacing < 0.0f) spacing = 0.0f;
-      waves[follower].noseWidth = spacing * noseRatio;
-      waves[leader].tailWidth = spacing * tailRatio;
-    }
-  }
-
-  if (reverse.size() >= 2) {
-    sortByCenter(reverse);
-    for (size_t i = 1; i < reverse.size(); i++) {
-      const int leader = reverse[i - 1];
-      const int follower = reverse[i];
-      float spacing = waves[follower].center - waves[leader].center;
-      if (spacing < 0.0f) spacing = 0.0f;
-      waves[follower].noseWidth = spacing * noseRatio;
-      waves[leader].tailWidth = spacing * tailRatio;
+      waves[follower].noseWidth = spacing * noseRatioResolved;
+      waves[leader].tailWidth = spacing * tailRatioResolved;
     }
   }
 }
@@ -202,20 +202,27 @@ void animationEngineSetBuffer(Rgb* leds) {
 
 void animationEngineReset(uint32_t nowMs) {
   s_lastWaveTime = nowMs;
-  s_lastWaveIntervalMs = 0;
   s_lastWavePeriodMs = 0;
   s_nextWaveDueMs = 0;
   s_smoothedBeatPeriodMs = 0.0f;
   s_lastBeatMs = 0;
-  s_lastBeatStrength = 0.7f;
   s_lastBeatIntervalMs = 0;
   s_lastPulseBeatMs = 0;
   s_lastPulseIntervalMs = 0;
   s_startupSnapshotTaken = false;
   s_startupMs = nowMs;
   s_fadeSnapshotTaken = false;
-  s_fadeStartMs = 0;
   s_lastSyntheticBeatMs = 0;
+  s_beatTriggerAccumulator = 0.0f;
+  s_fallbackTriggerAccumulator = 0.0f;
+  s_schedulerTelemetry.lastSpawnMs = 0;
+  s_schedulerTelemetry.lastFallbackIntervalMs = 0;
+  s_schedulerTelemetry.lastSpawnReason = WaveSpawnReason::None;
+}
+
+void getAnimationSchedulerTelemetry(AnimationSchedulerTelemetry* out) {
+  if (!out) return;
+  *out = s_schedulerTelemetry;
 }
 
 void runLedAnimation(uint32_t now) {
@@ -226,48 +233,65 @@ void runLedAnimation(uint32_t now) {
   if (!s_startupSnapshotTaken) {
     s_startupSnapshotTaken = true;
     s_startupAvgBeatMs = getAverageBeatIntervalMs();
-    s_startupBeatStrength = s_lastBeatStrength;
     s_startupLastBeatIntervalMs =
       (s_lastBeatIntervalMs > 0) ? (float)s_lastBeatIntervalMs : s_startupAvgBeatMs;
   }
 
-  bool beatEvent = false;
-#if ENABLE_BEAT_WAVES
-  const uint32_t lastRealBeatBefore = getLastRealBeatMs();
-  float beatStrength = 0.0f;
-  const bool beatConsumed = consumeBeat(&beatStrength);
-  const uint32_t lastRealBeatAfter = getLastRealBeatMs();
-  const bool beatIsReal = beatConsumed && (lastRealBeatAfter != lastRealBeatBefore);
-  const uint32_t refBeatMsForFakeWindow = (lastRealBeatAfter > 0) ? lastRealBeatAfter : s_startupMs;
-  const uint32_t idleMs = (refBeatMsForFakeWindow > 0 && now >= refBeatMsForFakeWindow)
-    ? (now - refBeatMsForFakeWindow)
+  const uint32_t lastRealBeatForPhaseMs = getLastRealBeatMs();
+  const uint32_t refBeatMsForPhase = (lastRealBeatForPhaseMs > 0) ? lastRealBeatForPhaseMs : s_startupMs;
+  const uint32_t idleMsForPhase = (refBeatMsForPhase > 0 && now >= refBeatMsForPhase)
+    ? (now - refBeatMsForPhase)
     : 0;
-  const bool inFakeWindow = (idleMs < FADE_TO_STARTUP_IDLE_MS);
+  const bool inFakeWindowForPhase = (idleMsForPhase < FADE_TO_STARTUP_IDLE_MS);
+  const float waitProgress = (FADE_TO_STARTUP_IDLE_MS > 0)
+    ? clamp01((float)idleMsForPhase / (float)FADE_TO_STARTUP_IDLE_MS)
+    : 1.0f;
 
-  if (beatConsumed && (beatIsReal || inFakeWindow)) {
+  bool beatEvent = false;
+  WaveSpawnReason beatSpawnReason = WaveSpawnReason::None;
+#if ENABLE_BEAT_WAVES
+  BeatEvent beat = {0.0f, 0, false};
+  const bool beatConsumed = consumeBeat(&beat);
+  const bool beatIsReal = beatConsumed && beat.isReal;
+  bool syntheticFakeDue = false;
+  uint32_t syntheticIntervalMs = 0;
+
+  if (!beatConsumed && inFakeWindowForPhase) {
+    syntheticIntervalMs = s_lastBeatIntervalMs;
+    if (syntheticIntervalMs == 0) {
+      syntheticIntervalMs = (uint32_t)lroundf(getAverageBeatIntervalMs());
+    }
+    if (syntheticIntervalMs < g_config.avgBeatMinMs) syntheticIntervalMs = g_config.avgBeatMinMs;
+    if (syntheticIntervalMs > g_config.avgBeatMaxMs) syntheticIntervalMs = g_config.avgBeatMaxMs;
+    if (syntheticIntervalMs == 0) syntheticIntervalMs = 500;
+    syntheticFakeDue = (s_lastSyntheticBeatMs == 0 || (now - s_lastSyntheticBeatMs) >= syntheticIntervalMs);
+  }
+
+  const BeatFlowResult beatFlow = evaluateBeatFlow({
+    beatConsumed,
+    beatIsReal,
+    inFakeWindowForPhase,
+    syntheticFakeDue,
+    false
+  });
+
+  if (beatFlow.emitBeatEvent) {
     beatEvent = true;
-    if (s_lastBeatMs > 0) {
-      s_lastBeatIntervalMs = now - s_lastBeatMs;
-    }
-    s_lastBeatMs = now;
-    s_lastBeatStrength = beatStrength;
-    if (beatIsReal) {
-      s_lastSyntheticBeatMs = 0;
-    }
-  } else if (!beatConsumed && inFakeWindow) {
-    uint32_t intervalMs = s_lastBeatIntervalMs;
-    if (intervalMs == 0) {
-      intervalMs = (uint32_t)lroundf(getAverageBeatIntervalMs());
-    }
-    if (intervalMs < g_config.avgBeatMinMs) intervalMs = g_config.avgBeatMinMs;
-    if (intervalMs > g_config.avgBeatMaxMs) intervalMs = g_config.avgBeatMaxMs;
-    if (intervalMs == 0) intervalMs = 500;
-    if (s_lastSyntheticBeatMs == 0 || (now - s_lastSyntheticBeatMs) >= intervalMs) {
+    beatSpawnReason = beatFlow.reason;
+    if (beatConsumed) {
+      uint32_t beatTimeMs = beat.timestampMs;
+      if (beatTimeMs == 0 || beatTimeMs > now) beatTimeMs = now;
+      if (s_lastBeatMs > 0 && beatTimeMs >= s_lastBeatMs) {
+        s_lastBeatIntervalMs = beatTimeMs - s_lastBeatMs;
+      }
+      s_lastBeatMs = beatTimeMs;
+      if (beatIsReal) {
+        s_lastSyntheticBeatMs = 0;
+      }
+    } else if (beatFlow.reason == WaveSpawnReason::FakeBeat && syntheticFakeDue) {
       s_lastSyntheticBeatMs = now;
       s_lastBeatMs = now;
-      s_lastBeatIntervalMs = intervalMs;
-      if (s_lastBeatStrength <= 0.001f) s_lastBeatStrength = 0.7f;
-      beatEvent = true;
+      s_lastBeatIntervalMs = syntheticIntervalMs;
     }
   }
 #endif
@@ -295,33 +319,36 @@ void runLedAnimation(uint32_t now) {
   }
 #endif
 
-  if (fadeToStartup > 0.0f) {
-    if (s_fadeStartMs == 0) s_fadeStartMs = now;
-  } else {
-    s_fadeStartMs = 0;
-  }
+  const AnimationEffectContext effectCtx = {
+    beatEvent,
+    (!beatEvent && inFakeWindowForPhase && fadeToStartup <= 0.0f),
+    (fadeToStartup > 0.0f),
+    waitProgress,
+    fadeToStartup,
+  };
+  ResolvedAnimationEffects effects = {};
+  resolveAnimationEffects(effectCtx, g_config, &effects);
+  const bool beatWavesEnabled = effects.enableBeatWaves;
+  const bool fallbackWavesEnabled = effects.enableFallbackWaves;
 
-  setWaveSpeedBase(g_config.waveSpeedBase);
-  setWaveSpeedRange(g_config.waveSpeedRange);
+  setWaveSpeedBase(effects.waveSpeedBase);
+  setWaveSpeedRange(effects.waveSpeedRange);
   setWaveSpeedMultiplier(g_config.waveSpeedMultiplier);
 
   float beatPeriodMs = getAverageBeatIntervalMs();
   const float lastBeatIntervalMsRaw = (float)s_lastBeatIntervalMs;
   float lastBeatIntervalMsF = lastBeatIntervalMsRaw;
-  float beatStrengthForWave = s_lastBeatStrength;
   if (fadeToStartup > 0.0f) {
     if (!s_fadeSnapshotTaken) {
       s_fadeSnapshotTaken = true;
       s_fadeFromAvgBeatMs = beatPeriodMs;
       s_fadeFromLastBeatIntervalMs =
         (lastBeatIntervalMsRaw > 0.0f) ? lastBeatIntervalMsRaw : beatPeriodMs;
-      s_fadeFromBeatStrength = beatStrengthForWave;
     }
     beatPeriodMs = lerpf(s_fadeFromAvgBeatMs, s_startupAvgBeatMs, fadeToStartup);
     const float startupIntervalTargetMs =
       (s_startupLastBeatIntervalMs > 0.0f) ? s_startupLastBeatIntervalMs : s_startupAvgBeatMs;
     lastBeatIntervalMsF = lerpf(s_fadeFromLastBeatIntervalMs, startupIntervalTargetMs, fadeToStartup);
-    beatStrengthForWave = lerpf(s_fadeFromBeatStrength, s_startupBeatStrength, fadeToStartup);
   } else {
     s_fadeSnapshotTaken = false;
   }
@@ -331,26 +358,34 @@ void runLedAnimation(uint32_t now) {
   beatPeriodMs = effectiveIntervalMs;
 
 #if ENABLE_BEAT_WAVES
-  if (g_config.enableBeatWaves && fadeToStartup > 0.0f && !beatEvent) {
-    uint32_t periodMs = (uint32_t)lroundf(beatPeriodMs);
-    if (periodMs < 1) periodMs = 1;
-    if (s_nextWaveDueMs == 0) {
-      s_nextWaveDueMs = (s_lastWaveTime > 0) ? (s_lastWaveTime + periodMs) : (now + periodMs);
-      s_lastWavePeriodMs = periodMs;
-    } else if (periodMs != s_lastWavePeriodMs) {
-      s_nextWaveDueMs = (s_lastWaveTime > 0) ? (s_lastWaveTime + periodMs) : (now + periodMs);
-      s_lastWavePeriodMs = periodMs;
-    }
+  if (beatWavesEnabled && fadeToStartup > 0.0f && !beatEvent) {
+    const RelaxTickResult relax = evaluateRelaxTick(
+      {
+        now,
+        s_lastWaveTime,
+        beatPeriodMs,
+      },
+      {
+        s_nextWaveDueMs,
+        s_lastWavePeriodMs,
+      }
+    );
+    s_nextWaveDueMs = relax.state.nextDueMs;
+    s_lastWavePeriodMs = relax.state.periodMs;
 
-    if ((int32_t)(now - s_nextWaveDueMs) >= 0) {
+    const BeatFlowResult relaxFlow = evaluateBeatFlow({
+      false,
+      false,
+      false,
+      false,
+      relax.fired
+    });
+    if (relaxFlow.emitBeatEvent) {
       beatEvent = true;
+      beatSpawnReason = relaxFlow.reason;
       s_lastBeatMs = now;
-      s_lastBeatIntervalMs = periodMs;
+      s_lastBeatIntervalMs = s_lastWavePeriodMs;
       s_lastSyntheticBeatMs = now;
-      if (s_lastBeatStrength <= 0.001f) s_lastBeatStrength = 0.7f;
-      do {
-        s_nextWaveDueMs += periodMs;
-      } while ((int32_t)(now - s_nextWaveDueMs) >= 0);
     }
   } else if (fadeToStartup <= 0.0f) {
     s_nextWaveDueMs = 0;
@@ -368,14 +403,20 @@ void runLedAnimation(uint32_t now) {
 
   bool spawnWaveNow = false;
 #if ENABLE_BEAT_WAVES
-  if (g_config.enableBeatWaves) {
-    // Spawn exactly once per beat event (real, synthetic, or relaxation tick).
-    spawnWaveNow = beatEvent;
+  if (beatWavesEnabled) {
+    if (effects.beatWaveTriggerScale >= 0.999f) {
+      s_beatTriggerAccumulator = 0.0f;
+      spawnWaveNow = beatEvent;
+    } else {
+      spawnWaveNow = consumeScaledTrigger(beatEvent, effects.beatWaveTriggerScale, &s_beatTriggerAccumulator);
+    }
   }
 #endif
 
   float baseBrightnessRatio = 0.70f;
   float pulseRatio = 1.0f;
+  float noseWidthPulseRatio = 1.0f;
+  float tailWidthPulseRatio = 1.0f;
   if (s_lastPulseBeatMs > 0) {
     float pulseIntervalMs = (s_lastPulseIntervalMs > 0.0f) ? (float)s_lastPulseIntervalMs : s_smoothedBeatPeriodMs;
     float intervalMs = pulseIntervalMs;
@@ -385,17 +426,25 @@ void runLedAnimation(uint32_t now) {
     int64_t pulseNow = (int64_t)now + (int64_t)g_config.pulseLeadMs;
     if (pulseNow < 0) pulseNow = 0;
     if (pulseNow > 0xFFFFFFFFLL) pulseNow = 0xFFFFFFFFLL;
-    const float minRatio = clampf(g_config.beatPulseMinRatio, 0.0f, 1.0f);
+    const float minRatio = clampf(effects.brightnessPulseMinRatio, 0.0f, 1.0f);
+    const float noseWidthMinRatio = clampf(effects.noseWidthScaleMin, 0.0f, 1.0f);
+    const float tailWidthMinRatio = clampf(effects.tailWidthScaleMin, 0.0f, 1.0f);
     if (beatEvent) {
       pulseRatio = kBrightnessMaxRatio;
+      noseWidthPulseRatio = 1.0f;
+      tailWidthPulseRatio = 1.0f;
     } else {
       pulseRatio = beatPulseRatio(intervalMs, (uint32_t)pulseNow, minRatio, s_lastPulseBeatMs);
+      noseWidthPulseRatio = beatPulseRatio(intervalMs, (uint32_t)pulseNow, noseWidthMinRatio, s_lastPulseBeatMs);
+      tailWidthPulseRatio = beatPulseRatio(intervalMs, (uint32_t)pulseNow, tailWidthMinRatio, s_lastPulseBeatMs);
     }
   }
 
   if (fadeToStartup > 0.0f) {
     baseBrightnessRatio = lerpf(baseBrightnessRatio, 0.70f, fadeToStartup);
     pulseRatio = lerpf(pulseRatio, 1.0f, fadeToStartup);
+    noseWidthPulseRatio = lerpf(noseWidthPulseRatio, 1.0f, fadeToStartup);
+    tailWidthPulseRatio = lerpf(tailWidthPulseRatio, 1.0f, fadeToStartup);
   }
 
   int frameBrightness = (int)lroundf((float)g_config.brightness * baseBrightnessRatio);
@@ -421,7 +470,7 @@ void runLedAnimation(uint32_t now) {
   const bool wavesRemoved = wavesAfterMove < wavesBefore;
   const bool spacingDue = wavesRemoved || (wavesMoved && (now - lastSpacingMs) >= WAVE_SPACING_INTERVAL_MS);
   if (spacingDue) {
-    applyWaveRatiosFromSpacing();
+    applyWaveRatiosFromSpacing(effects.waveNoseRatio, effects.waveTailRatio);
     lastSpacingMs = now;
   }
 
@@ -429,14 +478,15 @@ void runLedAnimation(uint32_t now) {
   auto& waves = getWavesMutable();
   for (size_t i = 0; i < waves.size(); ) {
     const auto& wave = waves[i];
+    const float tailWidth = wave.tailWidth * tailWidthPulseRatio;
+    const float noseWidth = wave.noseWidth * noseWidthPulseRatio;
     const int lit = renderInterpolatedFrame(
       frames,
       wave.center,
       wave.hue,
-      wave.tailWidth,
-      wave.noseWidth,
+      tailWidth,
+      noseWidth,
       frameBrightness,
-      wave.reverse,
       s_leds,
       s_ledCount
     );
@@ -448,48 +498,83 @@ void runLedAnimation(uint32_t now) {
   }
 
 #if ENABLE_BEAT_WAVES
-  if (g_config.enableBeatWaves && spawnWaveNow) {
+  if (beatWavesEnabled && spawnWaveNow) {
+    bool spawned = false;
     if (getWaves().size() >= g_config.maxActiveWaves) {
       dropOldestWave();
     }
     if (getWaves().size() < g_config.maxActiveWaves) {
       const uint32_t hue = (uint32_t)random_int(0, 65536);
       const int32_t hueStartOffset = 0;
-      const int32_t hueEndOffset = random_hue_drift_offset();
+      const int32_t hueEndOffset = random_hue_drift_offset(effects.waveHueDriftRounds);
       const int8_t speedCtl = speedControlFromPeriod((uint32_t)lroundf(beatPeriodMs));
-      const bool reverse = false;
-      addWave(hue, speedCtl, 1.0f, 1.0f, reverse, hueStartOffset, hueEndOffset);
-      applyWaveRatiosToLastWave(beatPeriodMs);
+      addWave(hue, speedCtl, 1.0f, 1.0f, hueStartOffset, hueEndOffset);
+      applyWaveRatiosToLastWave(beatPeriodMs, effects.waveNoseRatio, effects.waveTailRatio);
+      spawned = true;
     }
 
-    s_lastWaveIntervalMs = (s_lastWaveTime > 0) ? (now - s_lastWaveTime) : 0;
     s_lastWaveTime = now;
+    if (spawned) {
+      s_schedulerTelemetry.lastSpawnMs = now;
+      s_schedulerTelemetry.lastSpawnReason = beatSpawnReason;
+    }
   }
 #endif
 
 #if ENABLE_FALLBACK_WAVES
-  if (g_config.enableFallbackWaves) {
-    if (!g_config.enableBeatWaves) {
+  if (fallbackWavesEnabled) {
+    if (!beatWavesEnabled) {
       s_nextWaveDueMs = 0;
     }
-    const uint32_t lastRealBeatMs = getLastRealBeatMs();
-    const uint32_t refBeatMs = (lastRealBeatMs > 0) ? lastRealBeatMs : s_lastBeatMs;
-    const bool beatQuiet = (refBeatMs == 0) ? true : (now - refBeatMs >= g_config.fallbackMs);
-    const bool waveQuiet = (now - s_lastWaveTime >= g_config.fallbackMs);
-    if (beatQuiet && waveQuiet) {
+    const FallbackPolicyInput fallbackIn = {
+      now,
+      g_config.fallbackMs,
+      beatWavesEnabled,
+      getAverageBeatIntervalMs(),
+      g_config.avgBeatMinMs,
+      g_config.avgBeatMaxMs,
+      getLastRealBeatMs(),
+      s_startupMs,
+      s_lastBeatMs,
+      s_lastWaveTime,
+      kFallbackBeatOverdueRatio,
+    };
+    const FallbackPolicyResult fallback = evaluateFallbackPolicy(fallbackIn);
+    s_schedulerTelemetry.lastFallbackIntervalMs = fallback.intervalMs;
+
+    bool spawnFallbackNow = false;
+    if (effects.fallbackWaveTriggerScale >= 0.999f) {
+      s_fallbackTriggerAccumulator = 0.0f;
+      spawnFallbackNow = fallback.shouldSpawn;
+    } else {
+      spawnFallbackNow = consumeScaledTrigger(
+        fallback.shouldSpawn,
+        effects.fallbackWaveTriggerScale,
+        &s_fallbackTriggerAccumulator
+      );
+    }
+
+    if (spawnFallbackNow) {
+      bool spawned = false;
+      if (getWaves().size() >= g_config.maxActiveWaves) {
+        dropOldestWave();
+      }
       if (getWaves().size() < g_config.maxActiveWaves) {
         const uint32_t hue = (uint32_t)random_int(0, 65536);
-        const int8_t speedCtl = speedControlFromPeriod(g_config.fallbackMs);
+        const int8_t speedCtl = speedControlFromPeriod(fallback.intervalMs);
         const int32_t hueStartOffset = 0;
-        const int32_t hueEndOffset = random_hue_drift_offset();
-        addWave(hue, speedCtl, 1.0f, 1.0f, false, hueStartOffset, hueEndOffset);
-        applyWaveRatiosToLastWave((float)g_config.fallbackMs);
+        const int32_t hueEndOffset = random_hue_drift_offset(effects.waveHueDriftRounds);
+        addWave(hue, speedCtl, 1.0f, 1.0f, hueStartOffset, hueEndOffset);
+        applyWaveRatiosToLastWave((float)fallback.intervalMs, effects.waveNoseRatio, effects.waveTailRatio);
+        spawned = true;
       }
-      s_lastWaveIntervalMs = (s_lastWaveTime > 0) ? (now - s_lastWaveTime) : 0;
-      s_lastWaveTime = now;
-
-      applyWaveRatiosFromSpacing();
-      lastSpacingMs = now;
+      if (spawned) {
+        s_lastWaveTime = now;
+        s_schedulerTelemetry.lastSpawnMs = now;
+        s_schedulerTelemetry.lastSpawnReason = WaveSpawnReason::Fallback;
+        applyWaveRatiosFromSpacing(effects.waveNoseRatio, effects.waveTailRatio);
+        lastSpacingMs = now;
+      }
     }
   }
 #endif

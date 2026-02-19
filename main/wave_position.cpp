@@ -63,7 +63,7 @@ bool updateWaves(uint32_t nowMs) {
   for (auto& wave : waves) {
     wave.center += wave.speed * dt;
 
-    const float endCenter = wave.reverse ? (-kWaveTravelMarginFrames) : (maxIndex + kWaveTravelMarginFrames);
+    const float endCenter = maxIndex + kWaveTravelMarginFrames;
     const float denom = endCenter - wave.startCenter;
     float progress = 1.0f;
     if (fabsf(denom) > 1e-3f) {
@@ -80,8 +80,7 @@ bool updateWaves(uint32_t nowMs) {
 
   waves.erase(
     std::remove_if(waves.begin(), waves.end(), [maxIndex](const Wave& wave) {
-      return (!wave.reverse && wave.center > maxIndex + wave.noseWidth + 1.0f) ||
-             (wave.reverse && wave.center < -wave.tailWidth - 1.0f);
+      return wave.center > maxIndex + wave.noseWidth + 1.0f;
     }),
     waves.end()
   );
@@ -106,7 +105,6 @@ void addWave(uint32_t hue,
              int8_t speedControl,
              float nose,
              float tail,
-             bool reverse,
              int32_t hueStartOffset,
              int32_t hueEndOffset) {
   const float ctl = (float)speedControl / 10.0f; // -1..1
@@ -121,11 +119,9 @@ void addWave(uint32_t hue,
   if (speed < 0.0f) speed = 0.0f;
   const float speedPerSec = speed * s_waveSpeedBaseFps * s_waveSpeedMultiplier;
 
-  const float maxIndex = maxFrameIndex();
-
   Wave w;
-  w.center = reverse ? (maxIndex + kWaveTravelMarginFrames) : -kWaveTravelMarginFrames;
-  w.speed = reverse ? -speedPerSec : speedPerSec;
+  w.center = -kWaveTravelMarginFrames;
+  w.speed = speedPerSec;
   w.hue = hue;
   w.baseHue = hue;
   w.hueStartOffset = hueStartOffset;
@@ -133,6 +129,5 @@ void addWave(uint32_t hue,
   w.startCenter = w.center;
   w.noseWidth = nose;
   w.tailWidth = tail;
-  w.reverse = reverse;
   waves.push_back(w);
 }

@@ -25,6 +25,7 @@ static inline float clampF(float value, float lo, float hi) {
 RuntimeConfig g_config = {
   BRIGHTNESS1,
   BEAT_PULSE_MIN_RATIO,
+  BEAT_WIDTH_MIN_RATIO,
   BEAT_PULSE_DECAY_RATIO,
   BEAT_DECAY_MIN_MS,
   BEAT_DECAY_MAX_MS,
@@ -52,6 +53,7 @@ RuntimeConfig g_config = {
 void normalizeConfig() {
   g_config.brightness = clampU8((int)g_config.brightness, 0, 255);
   g_config.beatPulseMinRatio = clampF(g_config.beatPulseMinRatio, 0.0f, 1.0f);
+  g_config.beatWidthMinRatio = clampF(g_config.beatWidthMinRatio, 0.0f, 1.0f);
   g_config.beatPulseDecayRatio = clampF(g_config.beatPulseDecayRatio, 0.1f, 5.0f);
   g_config.waveSpeedBase = clampF(g_config.waveSpeedBase, 0.0f, 10.0f);
   g_config.waveSpeedRange = clampF(g_config.waveSpeedRange, 0.0f, 1.0f);
@@ -67,7 +69,7 @@ void normalizeConfig() {
   }
   if (g_config.pulseLeadMs < -250) g_config.pulseLeadMs = -250;
   if (g_config.pulseLeadMs > 250) g_config.pulseLeadMs = 250;
-  g_config.fallbackMs = clampU16((long)g_config.fallbackMs, 0, 10000);
+  g_config.fallbackMs = clampU16((long)g_config.fallbackMs, 1, 10000);
   g_config.maxActiveWaves = clampU8((int)g_config.maxActiveWaves, 1, 100);
   if (g_config.energyEmaAlpha < 0.01f) g_config.energyEmaAlpha = 0.01f;
   if (g_config.energyEmaAlpha > 0.5f) g_config.energyEmaAlpha = 0.5f;
@@ -78,8 +80,8 @@ void normalizeConfig() {
   if (g_config.fluxRiseFactor < 0.02f) g_config.fluxRiseFactor = 0.02f;
   if (g_config.fluxRiseFactor > 0.6f) g_config.fluxRiseFactor = 0.6f;
   g_config.minBeatIntervalMs = clampU16((long)g_config.minBeatIntervalMs, 80, 1000);
-  g_config.avgBeatMinMs = clampU16((long)g_config.avgBeatMinMs, 430, 800);
-  g_config.avgBeatMaxMs = clampU16((long)g_config.avgBeatMaxMs, 430, 800);
+  g_config.avgBeatMinMs = clampU16((long)g_config.avgBeatMinMs, 120, 3000);
+  g_config.avgBeatMaxMs = clampU16((long)g_config.avgBeatMaxMs, 120, 3000);
   if (g_config.avgBeatMinMs > g_config.avgBeatMaxMs) {
     const uint16_t tmp = g_config.avgBeatMinMs;
     g_config.avgBeatMinMs = g_config.avgBeatMaxMs;

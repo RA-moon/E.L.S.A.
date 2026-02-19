@@ -63,7 +63,7 @@
 // Audio task period (ms) when AUDIO_TASK_ENABLE=1. Lower = more responsive, more CPU.
 #define AUDIO_INTERVAL            15
 // Default fallback wave interval (ms) when no beats are detected.
-// Used to init g_config.fallbackMs (clamped 0..10000).
+// Used to init g_config.fallbackMs (clamped 1..10000; 0 is coerced to 1).
 #define NO_BEAT_FALLBACK_MS       800
 
 // === Wave / Motion ===
@@ -77,9 +77,9 @@
 //   tail = 1 - (nose + gap) (trailing side)
 // If nose+gap > 1.0, both are scaled down proportionally (tail becomes 0).
 #define WAVE_NOSE_RATIO           0.20f
-#define WAVE_GAP_RATIO            0.20f
+#define WAVE_GAP_RATIO            0.10f
 // Default wave speed scalar (1.0 = current baseline travel speed).
-#define WAVE_SPEED_BASE           1.5f
+#define WAVE_SPEED_BASE           1.7f
 // Speed variation amount (0..1):
 //   0.0 => no variation
 //   1.0 => 0.5x..2.0x around WAVE_SPEED_BASE
@@ -119,7 +119,10 @@
 // Smoothing for beat period EMA (0..1). Lower = smoother, slower response.
 #define BEAT_PERIOD_EMA_ALPHA     0.05f
 // Minimum brightness ratio during beat decay (0..1).
-#define BEAT_PULSE_MIN_RATIO      0.10f
+#define BEAT_PULSE_MIN_RATIO      0.30f
+// Minimum wave nose/tail width ratio during beat decay (0..1).
+// 1.0 = no width shrink, 0.5 = half width at trough, 0.0 = fully collapsed at trough.
+#define BEAT_WIDTH_MIN_RATIO      0.50f
 // Decay time multiplier (0.1..5.0). Higher = slower decay.
 #define BEAT_PULSE_DECAY_RATIO    1.00f
 
@@ -183,6 +186,11 @@
 #define PROFILE_PERF              0
 #endif
 #define PROFILE_INTERVAL_MS       2000
+// Scheduler telemetry log cadence (ms). 0 = disabled.
+// Works independently from PROFILE_PERF.
+#ifndef SCHED_TELEMETRY_LOG_MS
+#define SCHED_TELEMETRY_LOG_MS    2000
+#endif
 
 // === Power ===
 // Dynamic frequency scaling (requires CONFIG_PM_ENABLE in sdkconfig).

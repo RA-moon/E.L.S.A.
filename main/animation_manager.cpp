@@ -22,7 +22,6 @@ static int fixedAnimation = 0;
 static bool autoMode = true;
 static std::vector<std::vector<int>> activeFrames;
 static float s_lastBpm = 0.0f;
-static float s_lastSwitchBpm = 0.0f;
 static uint32_t s_bpmWindowStartMs = 0;
 static float s_bpmWindowStartBpm = 0.0f;
 
@@ -107,7 +106,6 @@ void updateAnimationSwitch() {
         if (currentAnimation < 0 || currentAnimation >= count) currentAnimation = 0;
         activeFrames = animations[currentAnimation]();
         lastSwitchTime = now;
-        s_lastSwitchBpm = s_lastBpm;
         s_bpmWindowStartMs = now;
         s_bpmWindowStartBpm = s_lastBpm;
         return;
@@ -118,7 +116,6 @@ void updateAnimationSwitch() {
             currentAnimation = fixedAnimation;
             activeFrames = animations[currentAnimation]();
             lastSwitchTime = now;
-            s_lastSwitchBpm = s_lastBpm;
             s_bpmWindowStartMs = now;
             s_bpmWindowStartBpm = s_lastBpm;
         }
@@ -137,7 +134,6 @@ void updateAnimationSwitch() {
                 lastSwitchTime = now;
                 currentAnimation = pickRandomAnimation(count, currentAnimation);
                 activeFrames = animations[currentAnimation]();
-                s_lastSwitchBpm = s_lastBpm;
                 return;
             }
         }
@@ -150,6 +146,5 @@ void updateAnimationSwitch() {
         lastSwitchTime = now;
         currentAnimation = pickRandomAnimation(count, currentAnimation);
         activeFrames = animations[currentAnimation]();
-        s_lastSwitchBpm = s_lastBpm;
     }
 }

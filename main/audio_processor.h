@@ -4,16 +4,22 @@
 
 // Audio interface for SPH0645 I2S microphone + FFT beat detection.
 //
-// - consumeBeat(): edge-triggered beat events (optionally returns strength 0..1)
+// - consumeBeat(): edge-triggered beat events with source + strength metadata
 // - getAverageBeatIntervalMs(): exponential moving average of beat interval (ms)
 // - getAverageBpm(): convenience value derived from the average interval
 
 void setupI2S();
 void processAudio();
 
-// Beat detection event from FFT analysis.
-// Returns true once per detected beat (edge triggered).
-bool consumeBeat(float* strength = nullptr);
+struct BeatEvent {
+  float strength;      // 0..1
+  uint32_t timestampMs;
+  bool isReal;         // true = FFT-detected beat, false = synthetic/fake beat
+};
+
+// Beat event from audio processing (edge-triggered; consumed once).
+// Returns true when an event is available and copies metadata to outEvent if provided.
+bool consumeBeat(BeatEvent* outEvent = nullptr);
 
 // Average time between detected beats (milliseconds).
 float getAverageBeatIntervalMs();

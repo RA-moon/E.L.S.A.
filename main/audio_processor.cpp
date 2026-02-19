@@ -75,8 +75,12 @@ static DRAM_ATTR alignas(16) float s_fftBuffer[AUDIO_FFT_SAMPLES * 2];
 static DRAM_ATTR alignas(16) float s_prevMag[AUDIO_FFT_SAMPLES / 2] = {};
 static bool s_dspReady = false;
 
-static volatile bool s_beatPending = false;
-static volatile float s_beatStrength = 0.0f;
+static bool s_beatPending = false;
+static float s_beatStrength = 0.0f;
+static uint32_t s_beatTimestampMs = 0;
+static bool s_beatIsReal = false;
+static portMUX_TYPE s_beatMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_stateMux = portMUX_INITIALIZER_UNLOCKED;
 
 static float s_avgBeatIntervalMs = 500.0f;
 static uint32_t s_lastBeatMs = 0;
@@ -89,6 +93,28 @@ static uint16_t s_intervalBuffer[6] = {};
 static uint8_t s_intervalCount = 0;
 static uint8_t s_intervalIndex = 0;
 static AudioTelemetry s_audioTelemetry = {};
+
+static inline AudioTelemetry snapshotAudioTelemetry() {
+  AudioTelemetry out = {};
+  portENTER_CRITICAL(&s_stateMux);
+  out = s_audioTelemetry;
+  portEXIT_CRITICAL(&s_stateMux);
+  return out;
+}
+
+static inline void publishAudioTelemetry(const AudioTelemetry& telemetry) {
+  portENTER_CRITICAL(&s_stateMux);
+  s_audioTelemetry = telemetry;
+  portEXIT_CRITICAL(&s_stateMux);
+}
+
+static inline BeatDetectorConfig snapshotBeatConfig() {
+  BeatDetectorConfig out = {};
+  portENTER_CRITICAL(&s_stateMux);
+  out = s_beatConfig;
+  portEXIT_CRITICAL(&s_stateMux);
+  return out;
+}
 
 static inline uint32_t millis_idf() {
   return (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -105,46 +131,72 @@ static void initDsp() {
   s_dspReady = true;
 }
 
-bool consumeBeat(float* strength) {
-  if (!s_beatPending) return false;
-  s_beatPending = false;
-  if (strength) *strength = s_beatStrength;
+bool consumeBeat(BeatEvent* outEvent) {
+  bool pending = false;
+  BeatEvent event = {0.0f, 0, false};
+
+  portENTER_CRITICAL(&s_beatMux);
+  if (s_beatPending) {
+    pending = true;
+    event.strength = s_beatStrength;
+    event.timestampMs = s_beatTimestampMs;
+    event.isReal = s_beatIsReal;
+    s_beatPending = false;
+  }
+  portEXIT_CRITICAL(&s_beatMux);
+
+  if (!pending) return false;
+  if (outEvent) *outEvent = event;
   return true;
 }
 
 float getAverageBeatIntervalMs() {
-  return s_avgBeatIntervalMs;
+  float avg = 500.0f;
+  portENTER_CRITICAL(&s_stateMux);
+  avg = s_avgBeatIntervalMs;
+  portEXIT_CRITICAL(&s_stateMux);
+  return avg;
 }
 
 uint32_t getLastRealBeatMs() {
-  return s_lastRealBeatMs;
+  uint32_t lastReal = 0;
+  portENTER_CRITICAL(&s_beatMux);
+  lastReal = s_lastRealBeatMs;
+  portEXIT_CRITICAL(&s_beatMux);
+  return lastReal;
 }
 
 float getAverageBpm() {
-  const float ms = s_avgBeatIntervalMs;
+  const float ms = getAverageBeatIntervalMs();
   return (ms > 1.0f) ? (60000.0f / ms) : 0.0f;
 }
 
 void getAudioTelemetry(AudioTelemetry* out) {
   if (!out) return;
+  portENTER_CRITICAL(&s_stateMux);
   *out = s_audioTelemetry;
+  portEXIT_CRITICAL(&s_stateMux);
 }
 
 void getBeatDetectorConfig(BeatDetectorConfig* out) {
   if (!out) return;
+  portENTER_CRITICAL(&s_stateMux);
   *out = s_beatConfig;
+  portEXIT_CRITICAL(&s_stateMux);
 }
 
 void setBeatDetectorConfig(const BeatDetectorConfig* cfg) {
   if (!cfg) return;
+  portENTER_CRITICAL(&s_stateMux);
   s_beatConfig = *cfg;
+  portEXIT_CRITICAL(&s_stateMux);
 }
 
-static void updateBeatIntervalAverage(uint32_t nowMs) {
+static void updateBeatIntervalAverage(uint32_t nowMs, const BeatDetectorConfig& beatCfg) {
   if (s_lastBeatMs == 0) return;
   uint32_t intervalMs = nowMs - s_lastBeatMs;
-  if (intervalMs < s_beatConfig.avgBeatMinMs) intervalMs = s_beatConfig.avgBeatMinMs;
-  if (intervalMs > s_beatConfig.avgBeatMaxMs) intervalMs = s_beatConfig.avgBeatMaxMs;
+  if (intervalMs < beatCfg.avgBeatMinMs) intervalMs = beatCfg.avgBeatMinMs;
+  if (intervalMs > beatCfg.avgBeatMaxMs) intervalMs = beatCfg.avgBeatMaxMs;
 
   s_intervalBuffer[s_intervalIndex] = (uint16_t)intervalMs;
   s_intervalIndex = (uint8_t)((s_intervalIndex + 1) % (uint8_t)(sizeof(s_intervalBuffer) / sizeof(s_intervalBuffer[0])));
@@ -165,19 +217,32 @@ static void updateBeatIntervalAverage(uint32_t nowMs) {
   }
   const uint16_t median = tmp[s_intervalCount / 2];
 
-  s_avgBeatIntervalMs = (1.0f - kBeatIntervalEmaAlpha) * s_avgBeatIntervalMs +
-                        (kBeatIntervalEmaAlpha * (float)median);
+  float prevAvg = 500.0f;
+  portENTER_CRITICAL(&s_stateMux);
+  prevAvg = s_avgBeatIntervalMs;
+  portEXIT_CRITICAL(&s_stateMux);
+
+  const float newAvg = (1.0f - kBeatIntervalEmaAlpha) * prevAvg +
+                       (kBeatIntervalEmaAlpha * (float)median);
+  portENTER_CRITICAL(&s_stateMux);
+  s_avgBeatIntervalMs = newAvg;
+  portEXIT_CRITICAL(&s_stateMux);
 }
 
 static void fakeAudioPulse() {
   static uint32_t lastKickMs = 0;
   const uint32_t now = millis_idf();
+  const BeatDetectorConfig beatCfg = snapshotBeatConfig();
 
   if (now - lastKickMs > 120U && (esp_random() % 100) < 6) {
-    updateBeatIntervalAverage(now);
+    updateBeatIntervalAverage(now, beatCfg);
     s_lastBeatMs = now;
-    s_beatPending = true;
+    portENTER_CRITICAL(&s_beatMux);
     s_beatStrength = 0.7f;
+    s_beatTimestampMs = now;
+    s_beatIsReal = false;
+    s_beatPending = true;
+    portEXIT_CRITICAL(&s_beatMux);
     lastKickMs = now;
   }
 }
@@ -217,12 +282,14 @@ void setupI2S() {
 
   initDsp();
 
-  s_audioTelemetry.sampleRateHz = AUDIO_SAMPLE_RATE_HZ;
-  s_audioTelemetry.fftSamples = AUDIO_FFT_SAMPLES;
-  s_audioTelemetry.bassMinHz = kBassMinHz;
-  s_audioTelemetry.bassMaxHz = kBassMaxHz;
-  s_audioTelemetry.binWidthHz = (float)AUDIO_SAMPLE_RATE_HZ / (float)AUDIO_FFT_SAMPLES;
-  s_audioTelemetry.i2sOk = s_i2sOk;
+  AudioTelemetry telemetry = snapshotAudioTelemetry();
+  telemetry.sampleRateHz = AUDIO_SAMPLE_RATE_HZ;
+  telemetry.fftSamples = AUDIO_FFT_SAMPLES;
+  telemetry.bassMinHz = kBassMinHz;
+  telemetry.bassMaxHz = kBassMaxHz;
+  telemetry.binWidthHz = (float)AUDIO_SAMPLE_RATE_HZ / (float)AUDIO_FFT_SAMPLES;
+  telemetry.i2sOk = s_i2sOk;
+  publishAudioTelemetry(telemetry);
 
   ESP_LOGI(TAG, "I2S init: sr=%u pins BCLK=%d WS=%d DIN=%d %s",
            AUDIO_SAMPLE_RATE_HZ,
@@ -233,25 +300,29 @@ void setupI2S() {
 }
 
 void processAudio() {
+  const BeatDetectorConfig beatCfg = snapshotBeatConfig();
+  AudioTelemetry telemetry = snapshotAudioTelemetry();
+
   if (!s_i2sOk) {
     fakeAudioPulse();
-    s_audioTelemetry.i2sOk = false;
-    s_audioTelemetry.bass = 0.0f;
-    s_audioTelemetry.bassEma = s_bassEma;
-    s_audioTelemetry.ratio = 0.0f;
-    s_audioTelemetry.rise = 0.0f;
-    s_audioTelemetry.threshold = 0.0f;
-    s_audioTelemetry.riseThreshold = 0.0f;
-    s_audioTelemetry.micRms = 0.0f;
-    s_audioTelemetry.micPeak = 0.0f;
-    s_audioTelemetry.intervalOk = false;
-    s_audioTelemetry.above = false;
-    s_audioTelemetry.rising = false;
-    s_audioTelemetry.binMin = 0;
-    s_audioTelemetry.binMax = 0;
-    s_audioTelemetry.lastBeatMs = s_lastBeatMs;
-    s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
-    s_audioTelemetry.beatStrength = 0.0f;
+    telemetry.i2sOk = false;
+    telemetry.bass = 0.0f;
+    telemetry.bassEma = s_bassEma;
+    telemetry.ratio = 0.0f;
+    telemetry.rise = 0.0f;
+    telemetry.threshold = 0.0f;
+    telemetry.riseThreshold = 0.0f;
+    telemetry.micRms = 0.0f;
+    telemetry.micPeak = 0.0f;
+    telemetry.intervalOk = false;
+    telemetry.above = false;
+    telemetry.rising = false;
+    telemetry.binMin = 0;
+    telemetry.binMax = 0;
+    telemetry.lastBeatMs = s_lastBeatMs;
+    telemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
+    telemetry.beatStrength = 0.0f;
+    publishAudioTelemetry(telemetry);
     return;
   }
 
@@ -273,7 +344,8 @@ void processAudio() {
   if (!s_dspReady) {
     initDsp();
     if (!s_dspReady) {
-      s_audioTelemetry.i2sOk = false;
+      telemetry.i2sOk = false;
+      publishAudioTelemetry(telemetry);
       return;
     }
   }
@@ -315,49 +387,54 @@ void processAudio() {
   }
 
   if (s_bassEma <= 0.0001f) s_bassEma = bass;
-  s_bassEma = (1.0f - s_beatConfig.energyEmaAlpha) * s_bassEma + s_beatConfig.energyEmaAlpha * bass;
+  s_bassEma = (1.0f - beatCfg.energyEmaAlpha) * s_bassEma + beatCfg.energyEmaAlpha * bass;
   if (s_fluxEma <= 0.0001f) s_fluxEma = flux;
-  s_fluxEma = (1.0f - s_beatConfig.fluxEmaAlpha) * s_fluxEma + s_beatConfig.fluxEmaAlpha * flux;
+  s_fluxEma = (1.0f - beatCfg.fluxEmaAlpha) * s_fluxEma + beatCfg.fluxEmaAlpha * flux;
 
   const uint32_t now = millis_idf();
   const uint32_t intervalMs = (s_lastBeatMs > 0) ? (now - s_lastBeatMs) : 0;
-  const bool intervalOk = (now - s_lastBeatMs) >= s_beatConfig.minBeatIntervalMs;
+  const bool intervalOk = (now - s_lastBeatMs) >= beatCfg.minBeatIntervalMs;
   const float rise = flux - s_prevFlux;
-  const bool above = flux > (s_fluxEma * s_beatConfig.fluxThreshold);
-  const bool rising = rise > (s_fluxEma * s_beatConfig.fluxRiseFactor);
+  const bool above = flux > (s_fluxEma * beatCfg.fluxThreshold);
+  const bool rising = rise > (s_fluxEma * beatCfg.fluxRiseFactor);
 
   const float ratio = flux / (s_fluxEma + 1e-3f);
-  s_audioTelemetry.bass = bass;
-  s_audioTelemetry.bassEma = s_bassEma;
-  s_audioTelemetry.ratio = ratio;
-  s_audioTelemetry.rise = rise;
-  s_audioTelemetry.threshold = s_fluxEma * s_beatConfig.fluxThreshold;
-  s_audioTelemetry.riseThreshold = s_fluxEma * s_beatConfig.fluxRiseFactor;
-  s_audioTelemetry.micRms = micRms;
-  s_audioTelemetry.micPeak = micPeak;
-  s_audioTelemetry.intervalOk = intervalOk;
-  s_audioTelemetry.above = above;
-  s_audioTelemetry.rising = rising;
-  s_audioTelemetry.binMin = (uint16_t)bin_min;
-  s_audioTelemetry.binMax = (uint16_t)bin_max;
-  s_audioTelemetry.lastBeatMs = s_lastBeatMs;
-  s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
-  s_audioTelemetry.beatStrength = 0.0f;
-  s_audioTelemetry.i2sOk = true;
+  telemetry.bass = bass;
+  telemetry.bassEma = s_bassEma;
+  telemetry.ratio = ratio;
+  telemetry.rise = rise;
+  telemetry.threshold = s_fluxEma * beatCfg.fluxThreshold;
+  telemetry.riseThreshold = s_fluxEma * beatCfg.fluxRiseFactor;
+  telemetry.micRms = micRms;
+  telemetry.micPeak = micPeak;
+  telemetry.intervalOk = intervalOk;
+  telemetry.above = above;
+  telemetry.rising = rising;
+  telemetry.binMin = (uint16_t)bin_min;
+  telemetry.binMax = (uint16_t)bin_max;
+  telemetry.lastBeatMs = s_lastBeatMs;
+  telemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
+  telemetry.beatStrength = 0.0f;
+  telemetry.i2sOk = true;
 
   if (intervalOk && above && rising) {
-    const float strength = clamp01((ratio - s_beatConfig.fluxThreshold) / s_beatConfig.fluxThreshold);
-    s_beatPending = true;
+    const float strength = clamp01((ratio - beatCfg.fluxThreshold) / beatCfg.fluxThreshold);
+    portENTER_CRITICAL(&s_beatMux);
     s_beatStrength = strength;
-    s_audioTelemetry.beatStrength = strength;
+    s_beatTimestampMs = now;
+    s_beatIsReal = true;
+    s_beatPending = true;
+    s_lastRealBeatMs = now;
+    portEXIT_CRITICAL(&s_beatMux);
+    telemetry.beatStrength = strength;
 
-    updateBeatIntervalAverage(now);
+    updateBeatIntervalAverage(now, beatCfg);
     s_lastBeatIntervalMs = intervalMs;
     s_lastBeatMs = now;
-    s_lastRealBeatMs = now;
-    s_audioTelemetry.lastBeatMs = s_lastBeatMs;
-    s_audioTelemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
+    telemetry.lastBeatMs = s_lastBeatMs;
+    telemetry.lastBeatIntervalMs = s_lastBeatIntervalMs;
   }
 
   s_prevFlux = flux;
+  publishAudioTelemetry(telemetry);
 }

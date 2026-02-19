@@ -5,6 +5,7 @@
 struct RuntimeConfig {
   uint8_t brightness;
   float beatPulseMinRatio;
+  float beatWidthMinRatio;
   float beatPulseDecayRatio;
   uint16_t beatDecayMinMs;
   uint16_t beatDecayMaxMs;

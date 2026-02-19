@@ -9,3 +9,9 @@ in the development cycle.
 
 More information about PlatformIO Unit Testing:
 - https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+
+Local host policy test:
+- `./scripts/run_no_beat_policy_test.sh`
+- `./scripts/run_beat_event_flow_test.sh`
+- `./scripts/run_beat_scheduler_integration_test.sh`
+- `./scripts/run_host_tests.sh`
