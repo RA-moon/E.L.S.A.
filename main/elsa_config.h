@@ -15,7 +15,7 @@
 #define ENABLE_HAIR_STRIP         1   // 1 = init + render hair strip, 0 = disabled
 #endif
 #define DATA_PIN2                 2   // Hair strip data pin
-#define NUM_LEDS2                 44  // Hair strip length
+#define NUM_LEDS2                 88  // Hair strip length
 
 // === Render Loop / FPS ===
 // Baseline brightness used to initialize g_config.brightness (clamped 0..255).
@@ -53,11 +53,11 @@
 #define HAIR_COLOR_CYCLE_DURATION_MS 1800000UL  // 30 minutes (cannot be 0!!)
 // Hair strip segment indices (0..NUM_LEDS2-1). Code clamps ranges to bounds.
 // Non-rainbow segment is used for the "veins" animation.
-#define HAIR_RAINBOW_END1         32
-#define HAIR_FADE_START           33
-#define HAIR_FADE_END             39
-#define HAIR_RAINBOW_START2       40
-#define HAIR_RAINBOW_END2         43
+#define HAIR_RAINBOW_END1         88
+#define HAIR_FADE_START           89
+#define HAIR_FADE_END             90
+#define HAIR_RAINBOW_START2       91
+#define HAIR_RAINBOW_END2         92
 
 // === Audio Scheduling ===
 // Audio task period (ms) when AUDIO_TASK_ENABLE=1. Lower = more responsive, more CPU.
